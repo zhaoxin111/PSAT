@@ -1,0 +1,11 @@
+label:
+- color: '#ffffff'
+  name: __unclassified__
+- color: '#e9b96e'
+  name: __ground__
+- color: '#00ff00'
+  name: diaobi
+- color: '#ffff00'
+  name: diaosheng
+- color: '#ff0000'
+  name: diaowu
