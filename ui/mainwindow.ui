@@ -36,6 +36,7 @@
     <addaction name="actionOpen"/>
     <addaction name="actionOpenFolder"/>
     <addaction name="actionSave"/>
+    <addaction name="actionAutoSave"/>
     <addaction name="actionSetting"/>
     <addaction name="separator"/>
     <addaction name="actionExit"/>
@@ -105,6 +106,7 @@
    <addaction name="actionOpen"/>
    <addaction name="actionOpenFolder"/>
    <addaction name="actionSave"/>
+   <addaction name="actionAutoSave"/>
    <addaction name="separator"/>
    <addaction name="actionTop_view"/>
    <addaction name="actionBottom_view"/>
@@ -449,6 +451,27 @@
     <string>Exit</string>
    </property>
   </action>
+
+  <!-- Auto Save action -->
+  <action name="actionAutoSave">
+   <property name="icon">
+    <iconset resource="../icons.qrc">
+     <normaloff>:/icons/ui/icons/save.png</normaloff>:/icons/ui/icons/save.png</iconset>
+   </property>
+   <property name="text">
+    <string>Auto Save</string>
+   </property>
+   <property name="toolTip">
+    <string>Automatically save labels when they change</string>
+   </property>
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+  </action>
+
   <action name="actionPoint_size">
    <property name="icon">
     <iconset resource="../icons.qrc">

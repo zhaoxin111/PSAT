@@ -75,6 +75,18 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.init_connect()
         self.reload_cfg()
 
+        # Auto Save timer: saves when there are unsaved changes and auto-save is enabled
+        self.auto_save_timer = QtCore.QTimer(self)
+        self.auto_save_timer.setInterval(800)  # ms debounce
+        self.auto_save_timer.timeout.connect(self._auto_save_tick)
+        self.auto_save_timer.start()
+
+        # Hotkeys: A = previous file, D = next file
+        self.prev_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("A"), self)
+        self.prev_shortcut.activated.connect(self.go_previous_pointcloud)
+        self.next_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("D"), self)
+        self.next_shortcut.activated.connect(self.go_next_pointcloud)
+
     def open_file(self):
         self.dockWidget_files.setVisible(False)
         self.listWidget_files.clear()
@@ -458,6 +470,63 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
     def about(self):
         self.about_dialog.show()
 
+    def on_actionAutoSave_toggled(self, checked: bool):
+        # Update statusbar message when Auto Save toggled
+        self.show_message(f"Auto Save {'enabled' if checked else 'disabled'}")
+
+    def _auto_save_tick(self):
+        # Periodically auto-save when dirty and auto-save is enabled
+        try:
+            if hasattr(self, 'actionAutoSave') and self.actionAutoSave.isChecked():
+                if not self.save_state:
+                    self.save_category_and_instance()
+        except Exception:
+            # Avoid any unexpected timer crash; do nothing
+            pass
+
+    def go_previous_pointcloud(self):
+        self._navigate_pointcloud(-1)
+
+    def go_next_pointcloud(self):
+        self._navigate_pointcloud(1)
+
+    def _navigate_pointcloud(self, direction: int):
+        """
+        Navigate to previous/next point cloud file within current_root.
+        direction: -1 for previous (A), +1 for next (D)
+        """
+        if self.current_root is None:
+            return
+        try:
+            files = [f for f in os.listdir(self.current_root) if not f.endswith('.json')]
+        except Exception:
+            return
+        if not files:
+            return
+        files.sort()
+        if self.current_file is None:
+            target_index = 0 if direction > 0 else len(files) - 1
+        else:
+            basename = os.path.basename(self.current_file)
+            try:
+                idx = files.index(basename)
+            except ValueError:
+                idx = 0
+            target_index = (idx + direction) % len(files)
+
+        target_name = files[target_index]
+        target_path = os.path.join(self.current_root, target_name)
+
+        # Reflect selection in list widget if present
+        for i in range(self.listWidget_files.count()):
+            item = self.listWidget_files.item(i)
+            if item.text() == target_name:
+                self.listWidget_files.setCurrentRow(i)
+                break
+
+        self.current_file = target_path
+        self.point_cloud_read_thread_start(target_path)
+
     def init_connect(self):
         self.actionOpen.triggered.connect(self.open_file)
         self.actionOpenFolder.triggered.connect(self.open_folder)
@@ -488,6 +557,8 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.actionFilter.triggered.connect(self.openGLWidget.toggle_filter_mode)
         # Toggle enabling rotation-center-on-double-click
         self.actionRotationCenter.toggled.connect(self.openGLWidget.set_rotation_center_on_double_click_enabled)
+        # Auto Save toggle UI
+        self.actionAutoSave.toggled.connect(self.on_actionAutoSave_toggled)
 
         self.actionSetting.triggered.connect(self.setting)
         self.actionChinese.triggered.connect(self.translate_to_chinese)

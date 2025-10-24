@@ -298,6 +298,14 @@ class Ui_MainWindow(object):
         icon20.addPixmap(QtGui.QPixmap(":/icons/ui/icons/save.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
         self.actionSave.setIcon(icon20)
         self.actionSave.setObjectName("actionSave")
+
+        # Auto Save toggle (enabled by default)
+        self.actionAutoSave = QtWidgets.QAction(MainWindow)
+        self.actionAutoSave.setCheckable(True)
+        self.actionAutoSave.setChecked(True)
+        self.actionAutoSave.setIcon(icon20)
+        self.actionAutoSave.setObjectName("actionAutoSave")
+
         self.actionShortcut = QtWidgets.QAction(MainWindow)
         icon21 = QtGui.QIcon()
         icon21.addPixmap(QtGui.QPixmap(":/icons/ui/icons/keyboard.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
@@ -329,6 +337,8 @@ class Ui_MainWindow(object):
         self.menuFile.addAction(self.actionOpen)
         self.menuFile.addAction(self.actionOpenFolder)
         self.menuFile.addAction(self.actionSave)
+        # Add Auto Save toggle to File menu
+        self.menuFile.addAction(self.actionAutoSave)
         self.menuFile.addAction(self.actionSetting)
         self.menuFile.addSeparator()
         self.menuFile.addAction(self.actionExit)
@@ -360,6 +370,8 @@ class Ui_MainWindow(object):
         self.toolBar.addAction(self.actionOpen)
         self.toolBar.addAction(self.actionOpenFolder)
         self.toolBar.addAction(self.actionSave)
+        # Add Auto Save toggle to toolbar
+        self.toolBar.addAction(self.actionAutoSave)
         self.toolBar.addSeparator()
         self.toolBar.addAction(self.actionTop_view)
         self.toolBar.addAction(self.actionBottom_view)
@@ -445,6 +457,8 @@ class Ui_MainWindow(object):
         self.actionCachePick.setShortcut(_translate("MainWindow", "Esc"))
         self.actionSave.setText(_translate("MainWindow", "Save"))
         self.actionSave.setShortcut(_translate("MainWindow", "S"))
+        self.actionAutoSave.setText(_translate("MainWindow", "Auto Save"))
+        self.actionAutoSave.setToolTip(_translate("MainWindow", "Automatically save labels when they change"))
         self.actionShortcut.setText(_translate("MainWindow", "Shortcut"))
         self.actionAbout.setText(_translate("MainWindow", "About"))
         self.actionEnglish.setText(_translate("MainWindow", "English"))
