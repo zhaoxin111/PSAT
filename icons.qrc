@@ -2,6 +2,7 @@
   <qresource prefix="icons">
     <file>ui/icons/topview.png</file>
     <file>ui/icons/filter.png</file>
+    <file>ui/icons/change_rot_center.png</file>
     <file>ui/icons/setting.png</file>
     <file>ui/icons/semantic.png</file>
     <file>ui/icons/save.png</file>

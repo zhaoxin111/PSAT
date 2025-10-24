@@ -67,6 +67,8 @@ class GLWidget(QGLWidget):
         self.filter_mode:bool = False
         # Track whether a filtered subset is currently active
         self.is_filtered:bool = False
+        # Enable setting rotation center via left double-click
+        self.rotation_center_on_double_click_enabled:bool = True
 
     def init_vertex_shader(self):
         vertex_src = """
@@ -600,15 +602,20 @@ class GLWidget(QGLWidget):
         self.update()
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent):
-        x, y = event.pos().x(), self.height() - event.pos().y()
-        if self.pointcloud is None:
-            return
-        point = self.pickpoint(x, y)
-        print(point)
-        # 双击点移动到坐标中心
-        if point.size:
-            self.vertex_transform.setTranslationwithRotate(-point[0], -point[1], -point[2])
-        self.update()
+        # Left-button double-click: set nearest on-screen point as rotation center
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            if self.pointcloud is None:
+                return
+            if getattr(self, "rotation_center_on_double_click_enabled", False):
+                self.set_rotation_center_nearest_screen_point(event)
+                self.update()
+                return
+            # Fallback to previous ray-based pick when the feature is disabled
+            x, y = event.pos().x(), self.height() - event.pos().y()
+            point = self.pickpoint(x, y)
+            if point.size:
+                self.vertex_transform.setTranslationwithRotate(-point[0], -point[1], -point[2])
+            self.update()
 
     def cache_pick(self):
         self.change_mode_to_view()
@@ -762,6 +769,32 @@ class GLWidget(QGLWidget):
         index = np.argmin(points[:, 0] * vector.x() + points[:, 1] * vector.y() + points[:, 2] * vector.z())
         point = points[index]   # 取最近的点
         return point
+
+    def set_rotation_center_nearest_screen_point(self, event: QtGui.QMouseEvent):
+        """
+        Set rotation center to the nearest on-screen point to the mouse cursor.
+        Uses 2D screen-space distance among currently displayed (masked) points.
+        """
+        x = event.pos().x()
+        y = event.pos().y()
+        vertices2D = self.vertices_to_2D()
+        if vertices2D is None or vertices2D.shape[0] == 0:
+            return
+
+        # Compute nearest 2D point index
+        dx = vertices2D[:, 0] - x
+        dy = vertices2D[:, 1] - y
+        idx = int(np.argmin(dx * dx + dy * dy))
+        point = self.current_vertices[idx]
+
+        # Store and apply rotation center by translating such that the point is at origin
+        self.center_vertex = QVector3D(point[0], point[1], point[2])
+        self.vertex_transform.setTranslationwithRotate(-point[0], -point[1], -point[2])
+
+    def set_rotation_center_on_double_click_enabled(self, enabled: bool):
+        self.rotation_center_on_double_click_enabled = enabled
+        if self.mainwindow:
+            self.mainwindow.show_message("Rotation center on double-click: {}".format("ON" if enabled else "OFF"), 2000)
 
     def wheelEvent(self, event: QtGui.QWheelEvent):
         self.ortho_area_change(event)

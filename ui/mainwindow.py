@@ -319,6 +319,13 @@ class Ui_MainWindow(object):
         icon23.addPixmap(QtGui.QPixmap(":/icons/ui/icons/open.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
         self.actionOpenFolder.setIcon(icon23)
         self.actionOpenFolder.setObjectName("actionOpenFolder")
+
+        # Action: toggle rotation center on double-click
+        self.actionRotationCenter = QtWidgets.QAction(MainWindow)
+        self.actionRotationCenter.setCheckable(True)
+        self.actionRotationCenter.setChecked(True)
+        self.actionRotationCenter.setObjectName("actionRotationCenter")
+
         self.menuFile.addAction(self.actionOpen)
         self.menuFile.addAction(self.actionOpenFolder)
         self.menuFile.addAction(self.actionSave)
@@ -329,6 +336,7 @@ class Ui_MainWindow(object):
         self.menuView.addAction(self.actionRgb)
         self.menuView.addAction(self.actionCategory)
         self.menuView.addAction(self.actionInstance)
+        self.menuView.addAction(self.actionRotationCenter)
         self.menuView.addSeparator()
         self.menuView.addSeparator()
         self.menuView.addAction(self.actionPoint_size)
@@ -364,6 +372,7 @@ class Ui_MainWindow(object):
         self.toolBar.addAction(self.actionRgb)
         self.toolBar.addAction(self.actionCategory)
         self.toolBar.addAction(self.actionInstance)
+        self.toolBar.addAction(self.actionRotationCenter)
         self.toolBar.addSeparator()
         self.toolBar.addAction(self.actionGround_filter)
         self.toolBar.addAction(self.actionClassify)
@@ -441,4 +450,6 @@ class Ui_MainWindow(object):
         self.actionEnglish.setText(_translate("MainWindow", "English"))
         self.actionChinese.setText(_translate("MainWindow", "中文"))
         self.actionOpenFolder.setText(_translate("MainWindow", "Open Folder"))
+        self.actionRotationCenter.setText(_translate("MainWindow", "Rotation Center on Double-Click"))
+        self.actionRotationCenter.setToolTip(_translate("MainWindow", "Toggle: set nearest on-screen point to cursor as rotation center when left-double-clicking"))
 import icons_rc

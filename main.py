@@ -486,6 +486,8 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.actionPick.triggered.connect(self.openGLWidget.change_mode_to_pick)
         self.actionCachePick.triggered.connect(self.openGLWidget.cache_pick)
         self.actionFilter.triggered.connect(self.openGLWidget.toggle_filter_mode)
+        # Toggle enabling rotation-center-on-double-click
+        self.actionRotationCenter.toggled.connect(self.openGLWidget.set_rotation_center_on_double_click_enabled)
 
         self.actionSetting.triggered.connect(self.setting)
         self.actionChinese.triggered.connect(self.translate_to_chinese)
