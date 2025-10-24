@@ -355,7 +355,7 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.label_listWidget.clear()
             instances_set = list(set(self.openGLWidget.instances.tolist()))
             instances_set.sort()
-            color_map = self.openGLWidget.color_map * 255
+            color_map = (self.openGLWidget.color_map * 255).astype(np.int32)
             for index in instances_set:
                 item = QtWidgets.QListWidgetItem()
                 item.setSizeHint(QtCore.QSize(200, 30))
@@ -374,8 +374,8 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 label_instance.setText('{}'.format(index))
                 label_instance.setObjectName('label_instance')
 
-                color = color_map[index]
-                color = QColor(color[0], color[1], color[2])
+                c = color_map[index].tolist()
+                color = QColor(int(c[0]), int(c[1]), int(c[2]))
                 label_color = QtWidgets.QLabel()
                 label_color.setFixedWidth(10)
                 label_color.setStyleSheet("background-color: {};".format(color.name()))
