@@ -573,8 +573,39 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
 
 if __name__ == '__main__':
-    app = QtWidgets.QApplication([''])
+    # Multiprocessing safety for PyInstaller/Windows
+    try:
+        from multiprocessing import freeze_support, set_start_method, get_start_method
+        freeze_support()
+        # Ensure 'spawn' start method; ignore if already set
+        if get_start_method() != 'spawn':
+            set_start_method('spawn', force=True)
+    except Exception:
+        # Swallow runtime errors when method already set or on non-Windows
+        pass
+
+    # Single-instance guard (socket lock). If another instance holds the port, exit quietly.
+    import socket
+    _single_instance_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        # Use a deterministic, app-specific localhost port
+        _single_instance_sock.bind(('127.0.0.1', 49653))
+    except OSError:
+        # Another instance detected; avoid spawning additional windows
+        sys.exit(0)
+
+    # Normal GUI startup
+    app = QtWidgets.QApplication(sys.argv)
     mainwindow = Mainwindow()
     mainwindow.show()
+
+    # Handle file path from argv if launched via file association or drag-drop
+    if len(sys.argv) > 1:
+        candidate = sys.argv[1]
+        if os.path.isfile(candidate) and candidate.lower().endswith(('.las', '.ply', '.txt')):
+            mainwindow.current_root = os.path.dirname(candidate)
+            mainwindow.current_file = candidate
+            mainwindow.point_cloud_read_thread_start(candidate)
+
     sys.exit(app.exec_())
 

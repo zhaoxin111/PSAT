@@ -3,7 +3,6 @@
 
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
-from multiprocessing import Pool
 import laspy
 from plyfile import PlyData
 
@@ -102,15 +101,14 @@ class PointCloudReadThread(QThread):
 
     def run(self):
         self.message.emit("Open file | Loading ...", 10000000)    # 一直显示
-
-        pool = Pool()
-        p = pool.apply_async(func=self.read, args=(self.file_path,), callback=self.callback)
-        pool.close()
-        pool.join()
-
-        self.pointcloud = p.get()
-        self.message.emit("Open file | Load point cloud finished.", 1000)
-        self.tag.emit(True)
+        try:
+            self.pointcloud = self.read(self.file_path)
+            self.message.emit("Open file | Load point cloud finished.", 1000)
+            self.tag.emit(True)
+        except Exception as e:
+            self.pointcloud = None
+            self.message.emit(f"Open file | Error: {e}", 5000)
+            self.tag.emit(False)
 
     @staticmethod
     def read(file_path:str):

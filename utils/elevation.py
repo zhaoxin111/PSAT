@@ -2,7 +2,7 @@
 # @Author  : LG
 
 from PyQt5.QtCore import QThread, pyqtSignal
-from multiprocessing import Pool
+# removed: multiprocessing.Pool (caused PyInstaller child process re-exec on Windows)
 import numpy as np
 
 
@@ -18,13 +18,14 @@ class ElevationColorThread(QThread):
 
     def run(self):
         self.message.emit("Calculate elevation | Calculating ...", 10000000)  # 一直显示
-        pool = Pool()
-        p = pool.apply_async(func=self.cal_color_elevation, args=(self.vertices,), callback=self.callback)
-        pool.close()
-        pool.join()
-        self.elevation_color = p.get()
-        self.message.emit("Calculate elevation | Calculate finished.", 1000)
-        self.tag.emit(True)
+        try:
+            self.elevation_color = self.cal_color_elevation(self.vertices)
+            self.message.emit("Calculate elevation | Calculate finished.", 1000)
+            self.tag.emit(True)
+        except Exception as e:
+            self.elevation_color = None
+            self.message.emit(f"Calculate elevation | Error: {e}", 5000)
+            self.tag.emit(False)
 
     @staticmethod
     def cal_color_elevation(vertices):

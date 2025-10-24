@@ -14,7 +14,22 @@ from transform import Transform
 from math import pi, cos, sin
 from enum import Enum
 from collections import namedtuple
-import imgviz
+# Removed dependency on imgviz to simplify packaging (avoids pulling matplotlib in analysis)
+def label_colormap(n=256):
+    """
+    Generate a label colormap similar to PASCAL/VOC as uint8 array of shape (n, 3).
+    """
+    cmap = np.zeros((n, 3), dtype=np.uint8)
+    for i in range(n):
+        r = g = b = 0
+        cid = i
+        for j in range(8):
+            r |= ((cid & 1) << (7 - j))
+            g |= (((cid >> 1) & 1) << (7 - j))
+            b |= (((cid >> 2) & 1) << (7 - j))
+            cid >>= 3
+        cmap[i] = [r, g, b]
+    return cmap
 from configs import MODE, DISPLAY
 import datetime
 
@@ -58,7 +73,7 @@ class GLWidget(QGLWidget):
         self.projection = QMatrix4x4()
         self.camera = Camera()
 
-        self.color_map = np.array(imgviz.label_colormap(), dtype=np.float32) / 255
+        self.color_map = label_colormap(256).astype(np.float32) / 255
         self.color_map[0] = [1, 1, 1]
         self.mouse_left_button_pressed = False
         self.mouse_right_button_pressed = False

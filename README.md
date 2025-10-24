@@ -5,7 +5,7 @@
 3. 支持设置点云旋转中心。软件开启会自动开启该功能，可自行在面板取消。
 4. 支持点云过滤。在pick旁有个filter按钮，点击后可以选择保留的点云，右键鼠标结束。当再次点击该icon时，恢复显示所有点云。
 5. 修复instance显示时程序崩溃问题。
-
+6. 支持exe导出。python -m PyInstaller --noconfirm --clean PSAT.spec，导出exe位于dist/PSAT.exe
 
 # [PSAT](http://www.yatenglg.cn/psat) - 点云分割标注工具
 ![psat.png](example/pic/标注.gif)

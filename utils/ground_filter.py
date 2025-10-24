@@ -3,7 +3,7 @@
 
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
-from multiprocessing import Pool
+# removed: multiprocessing.Pool (child processes re-exec frozen exe and may spawn new GUI windows)
 try:
     import CSF
     USE_CSF = True
@@ -23,13 +23,14 @@ class GroundFilterThread(QThread):
 
     def run(self):
         self.message.emit("Ground filter | Filtering ...", 10000000) # 一直显示
-        pool = Pool()
-        p = pool.apply_async(func=self.filter, args=(self.vertices,), callback=self.callback)
-        pool.close()
-        pool.join()
-        self.ground = p.get()
-        self.message.emit("Ground filter | Filter finished.", 1000)
-        self.tag.emit(True)
+        try:
+            self.ground = self.filter(self.vertices)
+            self.message.emit("Ground filter | Filter finished.", 1000)
+            self.tag.emit(True)
+        except Exception as e:
+            self.ground = None
+            self.message.emit(f"Ground filter | Error: {e}", 5000)
+            self.tag.emit(False)
 
     @staticmethod
     def filter(vertices: np.ndarray):

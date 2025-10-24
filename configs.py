@@ -1,8 +1,21 @@
+import os
+import sys
 import yaml
 from enum import Enum
 
 
-DEFAULT_CONFIG_FILE = 'default.yaml'
+def resource_path(relative_path: str) -> str:
+    """
+    Resolve resource path for both normal execution and PyInstaller bundles.
+    - In a PyInstaller bundle, resources are extracted to sys._MEIPASS (onefile)
+      or located next to the executable (onedir).
+    - In normal execution, resolve relative to this file's directory.
+    """
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+
+DEFAULT_CONFIG_FILE = resource_path('default.yaml')
 
 def load_config(file):
     with open(file, 'rb')as f:
