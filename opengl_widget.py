@@ -64,6 +64,9 @@ class GLWidget(QGLWidget):
         self.mouse_right_button_pressed = False
         self.lastX, self.lastY = None, None
         self.polygon_vertices:list = []
+        self.filter_mode:bool = False
+        # Track whether a filtered subset is currently active
+        self.is_filtered:bool = False
 
     def init_vertex_shader(self):
         vertex_src = """
@@ -407,14 +410,71 @@ class GLWidget(QGLWidget):
         self.update()
 
     def change_mode_to_pick(self):
+        # Enter polygon annotation mode (never filter on right-click here)
+        self.filter_mode = False
         if self.mode == MODE.VIEW_MODE:
             self.mode = MODE.DRAW_MODE
-            self.polygon_vertices = []
+        self.polygon_vertices = []
 
     def change_mode_to_view(self):
         if self.mode == MODE.DRAW_MODE:
             self.mode = MODE.VIEW_MODE
             self.polygon_vertices = []
+
+    def toggle_filter_mode(self):
+        """
+        Toggle polygon filtering workflow:
+        - If currently drawing a filter polygon, clicking Filter will cancel and restore all points.
+        - If a filtered subset is active, clicking Filter will restore all points.
+        - Otherwise, clicking Filter enters filter drawing mode.
+        """
+        if self.mode == MODE.DRAW_MODE and self.filter_mode:
+            # Currently in filter drawing mode -> cancel and restore all points
+            self.filter_mode = False
+            self.mode = MODE.VIEW_MODE
+            self.polygon_vertices = []
+            if self.mask is not None:
+                self.mask.fill(True)
+            self.is_filtered = False
+            self.category_display_state_dict = {}
+            self.instance_display_state_dict = {}
+            # Refresh display according to current mode
+            if self.display == DISPLAY.ELEVATION:
+                if self.elevation_color is None:
+                    self.parent().elevation_color_thread_start()
+                else:
+                    self.change_color_to_elevation()
+            elif self.display == DISPLAY.RGB:
+                self.change_color_to_rgb()
+            elif self.display == DISPLAY.CATEGORY:
+                self.change_color_to_category()
+            elif self.display == DISPLAY.INSTANCE:
+                self.change_color_to_instance()
+        else:
+            # Not in filter draw mode
+            if getattr(self, 'is_filtered', False):
+                # A filtered subset is active -> restore all points
+                self.is_filtered = False
+                if self.mask is not None:
+                    self.mask.fill(True)
+                self.category_display_state_dict = {}
+                self.instance_display_state_dict = {}
+                if self.display == DISPLAY.ELEVATION:
+                    if self.elevation_color is None:
+                        self.parent().elevation_color_thread_start()
+                    else:
+                        self.change_color_to_elevation()
+                elif self.display == DISPLAY.RGB:
+                    self.change_color_to_rgb()
+                elif self.display == DISPLAY.CATEGORY:
+                    self.change_color_to_category()
+                elif self.display == DISPLAY.INSTANCE:
+                    self.change_color_to_instance()
+            else:
+                # Enter filter drawing mode
+                self.filter_mode = True
+                self.polygon_vertices = []
+                self.mode = MODE.DRAW_MODE
 
     def change_color_to_rgb(self):
         if self.pointcloud is None:
@@ -491,9 +551,12 @@ class GLWidget(QGLWidget):
                 else:
                     self.polygon_vertices.insert(-1, [x, y, 10000])
             elif event.button() == QtCore.Qt.MouseButton.RightButton:
-                # 选择类别与group
-                self.mainwindow.category_choice_dialog.load_cfg()
-                self.mainwindow.category_choice_dialog.show()
+                if self.filter_mode:
+                    self.apply_polygon_filter()
+                else:
+                    # 选择类别与group
+                    self.mainwindow.category_choice_dialog.load_cfg()
+                    self.mainwindow.category_choice_dialog.show()
         else:
             self.show_circle = True
             if event.button() == QtCore.Qt.MouseButton.LeftButton:
@@ -549,6 +612,8 @@ class GLWidget(QGLWidget):
 
     def cache_pick(self):
         self.change_mode_to_view()
+        # Ensure filter mode is off when caching/clearing selection
+        self.filter_mode = False
         self.mask.fill(True)
         self.category_display_state_dict = {}
         self.instance_display_state_dict = {}
@@ -556,6 +621,60 @@ class GLWidget(QGLWidget):
         self.mainwindow.save_state = False
         if self.display == DISPLAY.ELEVATION:
             self.change_color_to_elevation()
+        elif self.display == DISPLAY.RGB:
+            self.change_color_to_rgb()
+        elif self.display == DISPLAY.CATEGORY:
+            self.change_color_to_category()
+        elif self.display == DISPLAY.INSTANCE:
+            self.change_color_to_instance()
+
+    def apply_polygon_filter(self):
+        # Apply polygon selection to filter displayed points
+        if self.pointcloud is None or not self.polygon_vertices:
+            self.change_mode_to_view()
+            return
+
+        # Convert polygon to screen coordinates
+        polygon_vertices = [p[:] for p in self.polygon_vertices]
+        for p in polygon_vertices:
+            p[0] = p[0] / self.ortho_change_scale + self.width() / 2
+            p[1] = self.height() / 2 - p[1] / self.ortho_change_scale
+        polygon = QPolygonF([QPointF(p[0], p[1]) for p in polygon_vertices])
+        rect = polygon.boundingRect()
+
+        # Project all vertices (unmasked) to 2D screen space
+        projection = np.array(self.projection.data()).reshape(4, 4)
+        camera = np.array(self.camera.toMatrix().data()).reshape(4, 4)
+        vertex_transform = np.array(self.vertex_transform.toMatrix().data()).reshape(4, 4)
+        verts = np.hstack((self.pointcloud.xyz, np.ones((self.pointcloud.xyz.shape[0], 1), dtype=np.float32)))
+        verts2model = verts.dot(vertex_transform.dot(camera))
+        verts2projection = verts2model.dot(projection)
+        xys = verts2projection[:, :2]
+        xys = xys + np.array((1, -1))
+        xys = xys * np.array((self.width() / 2, self.height() / 2)) + 1.0
+        xys = xys * np.array((1, -1))
+
+        l, r, t, b = rect.x(), rect.x() + rect.width(), rect.y(), rect.y() + rect.height()
+        mask1 = (l < xys[:, 0]) & (xys[:, 0] < r) & (t < xys[:, 1]) & (xys[:, 1] < b)
+        mask2 = [polygon.containsPoint(QPointF(p[0], p[1]), QtCore.Qt.FillRule.WindingFill) for p in xys[mask1]]
+        mask1[mask1 == True] = mask2
+
+        # Set mask to selected points only
+        self.mask = mask1
+
+        # Exit draw mode
+        self.change_mode_to_view()
+        # Filter selection applied; mark filtered state active
+        self.is_filtered = True
+        self.filter_mode = False
+        self.polygon_vertices = []
+
+        # Refresh display to reflect new mask
+        if self.display == DISPLAY.ELEVATION:
+            if self.elevation_color is None:
+                self.parent().elevation_color_thread_start()
+            else:
+                self.change_color_to_elevation()
         elif self.display == DISPLAY.RGB:
             self.change_color_to_rgb()
         elif self.display == DISPLAY.CATEGORY:
@@ -596,7 +715,7 @@ class GLWidget(QGLWidget):
             self.categorys[mask] = index
 
         #
-        self.mask.fill(True)
+        # Keep current filtered mask; do not restore all points here
         self.category_display_state_dict = {}
         self.instance_display_state_dict = {}
 

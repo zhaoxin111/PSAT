@@ -31,6 +31,7 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.actionPick.setEnabled(False)
         self.actionCachePick.setEnabled(False)
+        self.actionFilter.setEnabled(False)
         self.dockWidget_files.setVisible(False)
         #
         self.actionClassify.setVisible(False)
@@ -155,6 +156,7 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.setWindowTitle(pointcloud.file_path)
             self.actionPick.setEnabled(True)
             self.actionCachePick.setEnabled(True)
+            self.actionFilter.setEnabled(True)
 
     def ground_filter_thread_start(self):
         if self.openGLWidget.pointcloud is None:
@@ -483,6 +485,7 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.actionPick.triggered.connect(self.openGLWidget.change_mode_to_pick)
         self.actionCachePick.triggered.connect(self.openGLWidget.cache_pick)
+        self.actionFilter.triggered.connect(self.openGLWidget.toggle_filter_mode)
 
         self.actionSetting.triggered.connect(self.setting)
         self.actionChinese.triggered.connect(self.translate_to_chinese)
