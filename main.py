@@ -41,6 +41,7 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.config_file = DEFAULT_CONFIG_FILE
         self.current_file = None
         self.current_root = None
+        self.results_root = None
         self.save_state = True
         self.category_choice_dialog = CategoryChoiceDialog(self, self)
         self.setting_dialog = SettingDialog(self, self)
@@ -133,25 +134,31 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
             if pointcloud is None:
                 return
             #
-            label_file = '.'.join(self.current_file.split('.')[:-1]) + '.json'
+            label_name = os.path.splitext(os.path.basename(self.current_file))[0] + '.json'
+            candidate_files = []
+            if getattr(self, 'results_root', None):
+                candidate_files.append(os.path.join(self.results_root, label_name))
+            candidate_files.append('.'.join(self.current_file.split('.')[:-1]) + '.json')
             categorys = None
             instances = None
-            if os.path.exists(label_file):
-                with open(label_file, 'r') as f:
-                    datas = load(f)
-                    info = datas.get('info', '')
-                    if info == 'PSAT label file.':
-                        categorys = datas.get('categorys', [])
-                        instances = datas.get('instances', [])
-                        categorys = np.array(categorys, dtype=np.int16)
-                        instances = np.array(instances, dtype=np.int16)
+            for label_file in candidate_files:
+                if os.path.exists(label_file):
+                    with open(label_file, 'r') as f:
+                        datas = load(f)
+                        info = datas.get('info', '')
+                        if info == 'PSAT label file.':
+                            categorys = datas.get('categorys', [])
+                            instances = datas.get('instances', [])
+                            categorys = np.array(categorys, dtype=np.int16)
+                            instances = np.array(instances, dtype=np.int16)
 
-                        if categorys.shape[0] != pointcloud.xyz.shape[0] or instances.shape[0] != pointcloud.xyz.shape[0]:
-                            QtWidgets.QMessageBox.warning(self, 'Warning', 'Point cloud size does not match label size!')
-                            if categorys.shape[0] != pointcloud.xyz.shape[0]:
-                                categorys = None
-                            if instances.shape[0] != pointcloud.xyz.shape[0]:
-                                instances = None
+                            if categorys.shape[0] != pointcloud.xyz.shape[0] or instances.shape[0] != pointcloud.xyz.shape[0]:
+                                QtWidgets.QMessageBox.warning(self, 'Warning', 'Point cloud size does not match label size!')
+                                if categorys.shape[0] != pointcloud.xyz.shape[0]:
+                                    categorys = None
+                                if instances.shape[0] != pointcloud.xyz.shape[0]:
+                                    instances = None
+                            break
             if pointcloud.num_point < 1:
                 return
 
@@ -268,7 +275,10 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
             if self.openGLWidget.categorys is not None and self.openGLWidget.instances is not None:
                 if self.current_file is None:
                     return
-                label_file = '.'.join(self.current_file.split('.')[:-1])+'.json'
+                base_name = os.path.splitext(os.path.basename(self.current_file))[0] + '.json'
+                target_dir = self.results_root if getattr(self, 'results_root', None) else os.path.dirname(self.current_file)
+                os.makedirs(target_dir, exist_ok=True)
+                label_file = os.path.join(target_dir, base_name)
 
                 datas = {}
                 datas['info'] = 'PSAT label file.'
@@ -530,6 +540,7 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
     def init_connect(self):
         self.actionOpen.triggered.connect(self.open_file)
         self.actionOpenFolder.triggered.connect(self.open_folder)
+        self.actionSetResultsFolder.triggered.connect(lambda: set_results_folder_for(self))
         self.listWidget_files.itemDoubleClicked.connect(self.double_click_files_widget)
         self.actionClose.triggered.connect(self.close_point_cloud)
         self.actionSave.triggered.connect(self.save_category_and_instance)
@@ -570,6 +581,16 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.save_window_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("P"), self)
         self.save_window_shortcut.activated.connect(self.openGLWidget.save_windows_to_pic)
+
+
+def set_results_folder_for(mainwindow: 'Mainwindow'):
+    dir = QtWidgets.QFileDialog.getExistingDirectory(mainwindow, caption='Select results folder')
+    if dir:
+        mainwindow.results_root = dir
+        mainwindow.show_message(f"Results folder set to: {dir}")
+    else:
+        # Cancelled; do nothing
+        pass
 
 
 if __name__ == '__main__':

@@ -328,6 +328,13 @@ class Ui_MainWindow(object):
         self.actionOpenFolder.setIcon(icon23)
         self.actionOpenFolder.setObjectName("actionOpenFolder")
 
+        # Action: Set Results Folder
+        self.actionSetResultsFolder = QtWidgets.QAction(MainWindow)
+        icon_results = QtGui.QIcon()
+        icon_results.addPixmap(QtGui.QPixmap(":/icons/ui/icons/文件夹-开_folder-open.svg"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        self.actionSetResultsFolder.setIcon(icon_results)
+        self.actionSetResultsFolder.setObjectName("actionSetResultsFolder")
+        
         # Action: toggle rotation center on double-click
         self.actionRotationCenter = QtWidgets.QAction(MainWindow)
         self.actionRotationCenter.setCheckable(True)
@@ -336,6 +343,7 @@ class Ui_MainWindow(object):
 
         self.menuFile.addAction(self.actionOpen)
         self.menuFile.addAction(self.actionOpenFolder)
+        self.menuFile.addAction(self.actionSetResultsFolder)
         self.menuFile.addAction(self.actionSave)
         # Add Auto Save toggle to File menu
         self.menuFile.addAction(self.actionAutoSave)
@@ -464,6 +472,7 @@ class Ui_MainWindow(object):
         self.actionEnglish.setText(_translate("MainWindow", "English"))
         self.actionChinese.setText(_translate("MainWindow", "中文"))
         self.actionOpenFolder.setText(_translate("MainWindow", "Open Folder"))
+        self.actionSetResultsFolder.setText(_translate("MainWindow", "Set Results Folder"))
         self.actionRotationCenter.setText(_translate("MainWindow", "Rotation Center on Double-Click"))
         self.actionRotationCenter.setToolTip(_translate("MainWindow", "Toggle: set nearest on-screen point to cursor as rotation center when left-double-clicking"))
 import icons_rc

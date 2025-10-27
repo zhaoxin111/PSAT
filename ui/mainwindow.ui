@@ -35,6 +35,7 @@
     </property>
     <addaction name="actionOpen"/>
     <addaction name="actionOpenFolder"/>
+    <addaction name="actionSetResultsFolder"/>
     <addaction name="actionSave"/>
     <addaction name="actionAutoSave"/>
     <addaction name="actionSetting"/>
@@ -719,6 +720,15 @@
    </property>
    <property name="text">
     <string>Open Folder</string>
+   </property>
+  </action>
+  <action name="actionSetResultsFolder">
+   <property name="icon">
+    <iconset resource="../icons.qrc">
+     <normaloff>:/icons/ui/icons/文件夹-开_folder-open.svg</normaloff>:/icons/ui/icons/文件夹-开_folder-open.svg</iconset>
+   </property>
+   <property name="text">
+    <string>Set Results Folder</string>
    </property>
   </action>
  </widget>
