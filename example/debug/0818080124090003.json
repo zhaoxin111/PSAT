@@ -1,0 +1,77 @@
+{
+    "sn": "0818080124090003",
+    "camera_to_image": [
+        [
+            2133.84,
+            0.0,
+            1867.3
+        ],
+        [
+            0.0,
+            2127.0,
+            1032.81
+        ],
+        [
+            0.0,
+            0.0,
+            1.0
+        ]
+    ],
+    "dist": [
+        5.07504,
+        5.18782,
+        -0.000770742,
+        -0.000411055,
+        0.7551,
+        5.0926,
+        5.30331,
+        1.40499,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+    ],
+    "lidar_to_camera": [
+        [
+            -0.00210268,
+            -0.999467,
+            -0.032582,
+            0.128651
+        ],
+        [
+            0.0242041,
+            0.0325216,
+            -0.999178,
+            -0.0139928
+        ],
+        [
+            0.999705,
+            -0.00288956,
+            0.0241228,
+            -0.00899432
+        ],
+        [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+        ]
+    ],
+    "projection_circle_angle": 180.0,
+    "judge_person_clustered_number": 6,
+    "judge_person_clustered_distance": 1.0,
+    "judge_crane_is_work_angle": 15.0,
+    "judge_person_under_crane_arm_distance": 1.0,
+    "judge_is_driver_project_to_arm_bottom_distance": 1.0,
+    "judge_is_driver_to_plane_distance": 2.0,
+    "threshold_ratio_xzbj": 0.5,
+    "threshold_person2diaowu": 1.0,
+    "threshold_angle_degree": 15.0,
+    "threshold_diaowu2ground": 0.7,
+    "threshold_person2ground": 1.8,
+    "camera_width": 3840,
+    "camera_height": 2160,
+    "core_mask": "RKNN_NPU_CORE_1"
+}

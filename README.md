@@ -8,6 +8,11 @@
 5. 修复instance显示时程序崩溃问题。
 6. 支持exe导出。python -m PyInstaller --noconfirm --clean PSAT.spec，导出exe位于dist/PSAT.exe
 7. 支持设置保存结果文件夹,若不设置默认保存在点云文件夹
+8. 支持点云投影在线可视化.
+step1: 点击load projection calibration导入内外参以及图片文件夹地址,内外参格式参考example/debug/0818080124090003.json;图片文件夹内图片名需与点云一致,后缀可为常见图片后缀(jpg,png,jpeg等)
+step2: 点击projection overlay即可显示投影结果;取消选中该按钮可取消显示图片.
+step3: 通过CTRL+鼠标滚轮调节图片大小;通过SHIFT+鼠标滚轮调节投影点大小.
+![example](example/pic/example.png)
 
 # [PSAT](http://www.yatenglg.cn/psat) - 点云分割标注工具
 ![psat.png](example/pic/标注.gif)
