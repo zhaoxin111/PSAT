@@ -32,6 +32,7 @@ def label_colormap(n=256):
     return cmap
 from configs import MODE, DISPLAY
 import datetime
+import json
 
 CATEGORY = namedtuple('CATEGORY', ['id', 'name', 'color'])
 
@@ -84,6 +85,30 @@ class GLWidget(QGLWidget):
         self.is_filtered:bool = False
         # Enable setting rotation center via left double-click
         self.rotation_center_on_double_click_enabled:bool = True
+
+        # Projection overlay elements
+        self.projection_enabled: bool = False
+        self.proj_K = None                   # 3x3 intrinsics
+        self.proj_dist = None                # distortion coefficients [k1,k2,p1,p2,k3] (OpenCV-style)
+        self.proj_T_lidar_cam = None         # 4x4 lidar->camera extrinsic
+        self.proj_image_folder: str = None   # optional override folder
+        self.proj_image_ext: str = '.jpg'    # default extension
+        self.proj_max_points: int = 200000   # cap to avoid UI stalls
+        # Undistort-and-project pipeline control (default on; fallbacks gracefully if OpenCV not present)
+        self.proj_use_undistort: bool = True
+        self._proj_warned_no_cv2: bool = False
+        # Adjustable overlay sizing and point size
+        self.proj_overlay_ratio: float = 0.45  # fraction of GL width (CTRL + mouse wheel to change)
+        self.proj_image_aspect: float = 1.5    # width/height (updated from image)
+        self.proj_point_size: int = 3          # projected point size in pixels (SHIFT + mouse wheel)
+
+        self.proj_label = QtWidgets.QLabel(self)
+        self.proj_label.setVisible(False)
+        self.proj_label.setStyleSheet("background-color: rgba(0,0,0,180); border: 1px solid #444;")
+        # dynamic size computed in _layout_projection_overlay()
+        self.proj_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        # Don't block interactions with GL canvas
+        self.proj_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
 
     def init_vertex_shader(self):
         vertex_src = """
@@ -382,6 +407,12 @@ class GLWidget(QGLWidget):
         glUniformMatrix4fv(self.proj_loc, 1, GL_FALSE, self.projection.data())
         glUseProgram(0)
 
+        # Layout the bottom-left projection overlay label
+        try:
+            self._layout_projection_overlay()
+        except Exception:
+            pass
+
     def pointsize_change(self, value:int):
         self.point_size += value
         if self.point_size < 1: self.point_size = 1
@@ -502,6 +533,8 @@ class GLWidget(QGLWidget):
         self.init_vertex_vao()
         self.update()
         self.mainwindow.update_dock()
+        # If projection overlay is enabled, refresh it
+        self._maybe_refresh_projection()
 
     def change_color_to_category(self):
         if self.pointcloud is None:
@@ -514,6 +547,8 @@ class GLWidget(QGLWidget):
         self.init_vertex_vao()
         self.update()
         self.mainwindow.update_dock()
+        # If projection overlay is enabled, refresh it (colors may have changed)
+        self._maybe_refresh_projection()
 
     def change_color_to_instance(self):
         if self.pointcloud is None:
@@ -526,6 +561,8 @@ class GLWidget(QGLWidget):
         self.init_vertex_vao()
         self.update()
         self.mainwindow.update_dock()
+        # Projection overlay uses category colors; still refresh to reflect mask changes
+        self._maybe_refresh_projection()
 
     def change_color_to_elevation(self):
         if self.pointcloud is None:
@@ -539,6 +576,8 @@ class GLWidget(QGLWidget):
         self.init_vertex_vao()
         self.update()
         self.mainwindow.update_dock()
+        # Projection overlay does not show elevation, but mask may have changed
+        self._maybe_refresh_projection()
 
     def category_color_update(self):
         if self.categorys is None:
@@ -840,6 +879,34 @@ class GLWidget(QGLWidget):
             self.mainwindow.show_message("Rotation center on double-click: {}".format("ON" if enabled else "OFF"), 2000)
 
     def wheelEvent(self, event: QtGui.QWheelEvent):
+        # CTRL + Wheel: resize projection overlay; SHIFT + Wheel: change projected point size
+        mods = event.modifiers()
+        try:
+            if mods & QtCore.Qt.ControlModifier:
+                delta = event.angleDelta().y()
+                step = 0.05
+                if delta > 0:
+                    self.proj_overlay_ratio = min(0.95, self.proj_overlay_ratio + step)
+                elif delta < 0:
+                    self.proj_overlay_ratio = max(0.20, self.proj_overlay_ratio - step)
+                self._layout_projection_overlay()
+                if hasattr(self, 'mainwindow') and self.mainwindow:
+                    self.mainwindow.show_message(f"Overlay size: {int(self.proj_overlay_ratio * 100)}%", 1500)
+                self._maybe_refresh_projection()
+                return
+            elif mods & QtCore.Qt.ShiftModifier:
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    self.proj_point_size = min(10, self.proj_point_size + 1)
+                elif delta < 0:
+                    self.proj_point_size = max(1, self.proj_point_size - 1)
+                if hasattr(self, 'mainwindow') and self.mainwindow:
+                    self.mainwindow.show_message(f"Projection point size: {self.proj_point_size}px", 1500)
+                self._maybe_refresh_projection()
+                return
+        except Exception:
+            pass
+        # Default: zoom viewport
         self.ortho_area_change(event)
         self.update()
 
@@ -941,3 +1008,253 @@ class GLWidget(QGLWidget):
         save_path = os.path.join(self.mainwindow.current_root, image_name)
         img.save(save_path)
         print("save image to ", save_path)
+
+    def _maybe_refresh_projection(self):
+        """Refresh bottom-left projection overlay if enabled and a calibration is loaded."""
+        try:
+            if getattr(self, "projection_enabled", False) and self.proj_K is not None and self.proj_T_lidar_cam is not None:
+                cur = getattr(self.mainwindow, "current_file", None)
+                if isinstance(cur, str) and len(cur) > 0:
+                    self.update_projection_for_current(cur)
+        except Exception:
+            pass
+
+    # ===== Projection overlay (bottom-left) =====
+
+    def _layout_projection_overlay(self):
+        """Place and size the overlay label at bottom-left with small margin."""
+        if getattr(self, "proj_label", None) is None:
+            return
+        margin = 10
+        # Compute target size based on GL width and image aspect
+        target_w = max(50, int(self.width() * float(getattr(self, 'proj_overlay_ratio', 0.45))))
+        aspect = float(getattr(self, 'proj_image_aspect', 1.5))
+        target_h = max(50, int(target_w / aspect)) if aspect > 1e-6 else 200
+        # Prevent overlay from exceeding 70% of GL height
+        max_h = int(self.height() * 0.7)
+        if target_h > max_h:
+            target_h = max_h
+            target_w = int(target_h * aspect)
+        self.proj_label.setFixedSize(target_w, target_h)
+        self.proj_label.move(margin, self.height() - target_h - margin)
+
+    def set_projection_enabled(self, enabled: bool):
+        """Toggle overlay visibility; refresh if enabled."""
+        self.projection_enabled = bool(enabled)
+        if self.proj_label:
+            self.proj_label.setVisible(self.projection_enabled)
+        # Refresh current cloud's projection when enabling
+        try:
+            if self.projection_enabled:
+                cur = getattr(self.mainwindow, "current_file", None)
+                if cur:
+                    self.update_projection_for_current(cur)
+        except Exception:
+            pass
+
+    def load_projection_from_file(self, json_path: str) -> bool:
+        """
+        Parse calibration.json:
+        { "camera_to_image": [[...],[...],[...]],
+          "dist": [k1,k2,p1,p2,k3],             // OpenCV style
+          "lidar_to_camera": [[...],[...],[...],[...]],
+          "image_folder": "optional path",
+          "image_ext": ".jpg" }
+        """
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            K = np.array(data.get("camera_to_image", []), dtype=np.float64)
+            D = np.array(data.get("dist", []), dtype=np.float64).reshape(-1)
+            T = np.array(data.get("lidar_to_camera", []), dtype=np.float64)
+            if K.shape != (3, 3) or T.shape != (4, 4):
+                return False
+            self.proj_K = K
+            self.proj_dist = D if D.size >= 4 else None
+            self.proj_T_lidar_cam = T
+            self.proj_image_folder = data.get("image_folder", None)
+            ext = data.get("image_ext", None)
+            if isinstance(ext, str) and len(ext) > 0:
+                self.proj_image_ext = ext if ext.startswith('.') else f'.{ext}'
+            return True
+        except Exception:
+            return False
+
+    def update_projection_for_current(self, pointcloud_path: str):
+        """
+        Compute and show projection for current cloud using loaded calibration.
+        Image filename is derived by replacing extension with self.proj_image_ext.
+        Falls back to searching common extensions if not found.
+        """
+        if not self.projection_enabled:
+            return
+        if self.pointcloud is None:
+            return
+        if self.proj_K is None or self.proj_T_lidar_cam is None:
+            if self.mainwindow:
+                self.mainwindow.show_message("Projection: calibration not loaded.", 4000)
+            return
+
+        # Resolve image path
+        base = os.path.splitext(os.path.basename(pointcloud_path))[0]
+        folder = self.proj_image_folder if self.proj_image_folder else os.path.dirname(pointcloud_path)
+        candidates = [os.path.join(folder, base + (self.proj_image_ext or '.jpg'))]
+        # Fallbacks
+        for ext in ['.jpg', '.jpeg', '.png', '.bmp']:
+            p = os.path.join(folder, base + ext)
+            if p not in candidates:
+                candidates.append(p)
+        image_path = None
+        for p in candidates:
+            if os.path.isfile(p):
+                image_path = p
+                break
+        if image_path is None:
+            if self.mainwindow:
+                self.mainwindow.show_message("Projection: image file not found.", 4000)
+            return
+
+        # Update overlay aspect and layout from image dimensions
+        tmp_img = QtGui.QImage(image_path)
+        if not tmp_img.isNull() and tmp_img.height() > 0:
+            self.proj_image_aspect = float(tmp_img.width()) / float(tmp_img.height())
+        self._layout_projection_overlay()
+
+        # Render
+        img = self._draw_projection_on_image(image_path)
+        if img is None:
+            return
+        # Fit into label while keeping aspect ratio
+        scaled = QtGui.QPixmap.fromImage(
+            img.scaled(self.proj_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        )
+        self.proj_label.setPixmap(scaled)
+        self.proj_label.setToolTip(os.path.basename(image_path))
+
+    def _draw_projection_on_image(self, image_path: str) -> QtGui.QImage:
+        """Return QImage with all (optionally decimated) points projected and colored by category."""
+        # Optionally undistort the image using OpenCV, and use the undistorted intrinsics
+        used_K = self.proj_K
+        qimg = None
+        try:
+            if self.proj_use_undistort and (self.proj_dist is not None and self.proj_dist.size >= 4):
+                import cv2
+                img_bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
+                if img_bgr is not None and self.proj_K is not None:
+                    h, w = img_bgr.shape[:2]
+                    K = self.proj_K.astype(np.float64)
+                    D = self.proj_dist.astype(np.float64).reshape(-1, 1) if self.proj_dist.ndim == 1 else self.proj_dist.astype(np.float64)
+                    K_new, _ = cv2.getOptimalNewCameraMatrix(K, D, (w, h), 0)
+                    img_ud = cv2.undistort(img_bgr, K, D, None, K_new)
+                    used_K = K_new
+                    img_rgb = cv2.cvtColor(img_ud, cv2.COLOR_BGR2RGB)
+                    qimg = QtGui.QImage(img_rgb.data, img_rgb.shape[1], img_rgb.shape[0], img_rgb.shape[1] * 3, QtGui.QImage.Format_RGB888).copy()
+        except Exception as e:
+            if not getattr(self, "_proj_warned_no_cv2", False):
+                if self.mainwindow:
+                    self.mainwindow.show_message(f"Projection: OpenCV undistort unavailable ({e}); using original image.", 4000)
+                self._proj_warned_no_cv2 = True
+            qimg = None
+        if qimg is None:
+            qimg = QtGui.QImage(image_path)
+            used_K = self.proj_K
+        if qimg.isNull():
+            if self.mainwindow:
+                self.mainwindow.show_message("Projection: failed to load image.", 4000)
+            return None
+        img_w, img_h = qimg.width(), qimg.height()
+
+        # Prepare 3D points in LiDAR/world coordinates (undo visualization offset)
+        xyz = self.pointcloud.xyz
+        offset = self.pointcloud.offset if getattr(self.pointcloud, 'offset', None) is not None else np.zeros(3, dtype=np.float32)
+        pts = xyz + offset  # shape (N,3)
+
+        # Homogeneous
+        N = pts.shape[0]
+        ones = np.ones((N, 1), dtype=np.float64)
+        pts_h = np.hstack([pts.astype(np.float64), ones])  # (N,4)
+
+        # Transform to camera
+        T = self.proj_T_lidar_cam  # (4,4)
+        cam = (pts_h @ T.T)  # (N,4)
+        X = cam[:, 0]
+        Y = cam[:, 1]
+        Z = cam[:, 2]
+
+        # Only points in front of camera
+        front = Z > 1e-6
+        if not np.any(front):
+            return qimg
+        X = X[front]; Y = Y[front]; Z = Z[front]
+
+        # Normalize
+        x = X / Z
+        y = Y / Z
+
+        x_d, y_d = x, y
+
+        # Intrinsics (use undistorted intrinsics if image was undistorted)
+        fx = used_K[0, 0]
+        fy = used_K[1, 1]
+        cx = used_K[0, 2]
+        cy = used_K[1, 2]
+        u = fx * x_d + cx
+        v = fy * y_d + cy
+
+        # In-image mask
+        in_img = (u >= 0) & (u < img_w) & (v >= 0) & (v < img_h)
+        if not np.any(in_img):
+            return qimg
+        u = u[in_img].astype(np.int32)
+        v = v[in_img].astype(np.int32)
+
+        # Colors by category
+        # Ensure category colors exist
+        try:
+            if self.category_color is None and self.categorys is not None:
+                self.category_color_update()
+            colors = (self.category_color[front][in_img] * 255.0).astype(np.uint8) if self.category_color is not None else np.full((u.shape[0], 3), 255, dtype=np.uint8)
+        except Exception:
+            colors = np.full((u.shape[0], 3), 255, dtype=np.uint8)
+
+        # Decimate to cap max points
+        M = u.shape[0]
+        if M > self.proj_max_points:
+            stride = max(1, M // self.proj_max_points)
+            u = u[::stride]
+            v = v[::stride]
+            colors = colors[::stride]
+
+        # Draw onto image
+        # Convert to 24-bit RGB format for painting
+        if qimg.format() != QtGui.QImage.Format_RGB888:
+            qimg = qimg.convertToFormat(QtGui.QImage.Format_RGB888)
+        painter = QtGui.QPainter(qimg)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+
+        # Group by color to reduce state changes; draw adjustable-sized squares for visibility
+        if u.size > 0:
+            s = max(1, int(getattr(self, 'proj_point_size', 3)))
+            keys = (colors[:, 0].astype(np.int32) << 16) | (colors[:, 1].astype(np.int32) << 8) | (colors[:, 2].astype(np.int32))
+            uniq = np.unique(keys)
+            for key in uniq:
+                mask = keys == key
+                r = (key >> 16) & 0xFF
+                g = (key >> 8) & 0xFF
+                b = key & 0xFF
+                color = QtGui.QColor(int(r), int(g), int(b))
+                if s <= 1:
+                    # Fast path: 1px points
+                    pen = QtGui.QPen(color)
+                    pen.setWidth(1)
+                    painter.setPen(pen)
+                    pts = [QtCore.QPoint(int(u[i]), int(v[i])) for i in np.nonzero(mask)[0]]
+                    painter.drawPoints(QtGui.QPolygon(pts))
+                else:
+                    # Draw small filled squares for visibility
+                    for i in np.nonzero(mask)[0]:
+                        x = int(u[i]) - s // 2
+                        y = int(v[i]) - s // 2
+                        painter.fillRect(x, y, s, s, color)
+        painter.end()
+        return qimg

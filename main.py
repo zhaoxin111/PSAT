@@ -20,6 +20,7 @@ from json import load, dump
 import functools
 import numpy as np
 import os
+from typing import Optional
 
 
 class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
@@ -39,9 +40,9 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         #
 
         self.config_file = DEFAULT_CONFIG_FILE
-        self.current_file = None
-        self.current_root = None
-        self.results_root = None
+        self.current_file: Optional[str] = None
+        self.current_root: Optional[str] = None
+        self.results_root: Optional[str] = None
         self.save_state = True
         self.category_choice_dialog = CategoryChoiceDialog(self, self)
         self.setting_dialog = SettingDialog(self, self)
@@ -78,7 +79,7 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.elevation_color_thread.tag.connect(self.elevation_color_thread_finished)
         self.elevation_color_thread.message.connect(self.show_message)
 
-        self.category_color_dict:OrderedDict = None
+        self.category_color_dict: Optional[OrderedDict] = None
 
         self.trans = QtCore.QTranslator()
 
@@ -206,6 +207,13 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.actionPick.setEnabled(True)
             self.actionCachePick.setEnabled(True)
             self.actionFilter.setEnabled(True)
+
+            # Update projection overlay if enabled
+            try:
+                if getattr(self, 'actionToggleProjection', None) and self.actionToggleProjection.isChecked():
+                    self.openGLWidget.update_projection_for_current(self.current_file)
+            except Exception:
+                pass
 
     def ground_filter_thread_start(self):
         if self.openGLWidget.pointcloud is None:
@@ -504,6 +512,39 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.translate('en')
         self.cfg['language'] = 'en'
 
+    def load_projection_calibration(self):
+        """
+        Select calibration.json (with camera_to_image, dist, lidar_to_camera) and optionally an image folder.
+        Then update the projection overlay for the current point cloud if enabled.
+        """
+        try:
+            json_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, caption='Select calibration.json', filter='JSON (*.json)')
+            if not json_path:
+                return
+            ok = self.openGLWidget.load_projection_from_file(json_path)
+            if not ok:
+                QtWidgets.QMessageBox.warning(self, 'Warning', 'Invalid calibration file or parse error.')
+                return
+
+            # If calibration didn’t define an image folder, ask user
+            if not getattr(self.openGLWidget, 'proj_image_folder', None):
+                img_dir = QtWidgets.QFileDialog.getExistingDirectory(self, caption='Select image folder')
+                if img_dir:
+                    self.openGLWidget.proj_image_folder = img_dir
+
+            # Default image extension if not set by calibration
+            if not getattr(self.openGLWidget, 'proj_image_ext', None):
+                self.openGLWidget.proj_image_ext = '.jpg'
+
+            # If user has toggled overlay ON and a point cloud is loaded, update now
+            if getattr(self, 'actionToggleProjection', None) and self.actionToggleProjection.isChecked():
+                if self.current_file and os.path.isfile(self.current_file):
+                    self.openGLWidget.update_projection_for_current(self.current_file)
+                else:
+                    self.show_message('Calibration loaded. Open a point cloud to see projection.', 4000)
+        except Exception as e:
+            self.show_message(f'Failed to load calibration: {e}', 5000)
+
     def shortcut(self):
         self.shortcut_dialog.show()
 
@@ -600,6 +641,11 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.actionRotationCenter.toggled.connect(self.openGLWidget.set_rotation_center_on_double_click_enabled)
         # Auto Save toggle UI
         self.actionAutoSave.toggled.connect(self.on_actionAutoSave_toggled)
+        # Projection overlay actions
+        if hasattr(self, 'actionToggleProjection'):
+            self.actionToggleProjection.toggled.connect(self.openGLWidget.set_projection_enabled)
+        if hasattr(self, 'actionLoadProjectionConfig'):
+            self.actionLoadProjectionConfig.triggered.connect(self.load_projection_calibration)
 
         self.actionSetting.triggered.connect(self.setting)
         self.actionChinese.triggered.connect(self.translate_to_chinese)

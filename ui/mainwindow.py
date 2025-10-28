@@ -328,6 +328,13 @@ class Ui_MainWindow(object):
         self.actionOpenFolder.setIcon(icon23)
         self.actionOpenFolder.setObjectName("actionOpenFolder")
 
+        # Projection overlay actions
+        self.actionToggleProjection = QtWidgets.QAction(MainWindow)
+        self.actionToggleProjection.setCheckable(True)
+        self.actionToggleProjection.setObjectName("actionToggleProjection")
+        self.actionLoadProjectionConfig = QtWidgets.QAction(MainWindow)
+        self.actionLoadProjectionConfig.setObjectName("actionLoadProjectionConfig")
+
         # Action: Set Results Folder
         self.actionSetResultsFolder = QtWidgets.QAction(MainWindow)
         icon_results = QtGui.QIcon()
@@ -355,6 +362,8 @@ class Ui_MainWindow(object):
         self.menuView.addAction(self.actionCategory)
         self.menuView.addAction(self.actionInstance)
         self.menuView.addAction(self.actionRotationCenter)
+        self.menuView.addAction(self.actionToggleProjection)
+        self.menuView.addAction(self.actionLoadProjectionConfig)
         self.menuView.addSeparator()
         self.menuView.addSeparator()
         self.menuView.addAction(self.actionPoint_size)
@@ -392,6 +401,8 @@ class Ui_MainWindow(object):
         self.toolBar.addAction(self.actionRgb)
         self.toolBar.addAction(self.actionCategory)
         self.toolBar.addAction(self.actionInstance)
+        self.toolBar.addAction(self.actionToggleProjection)
+        self.toolBar.addAction(self.actionLoadProjectionConfig)
         self.toolBar.addAction(self.actionRotationCenter)
         self.toolBar.addSeparator()
         self.toolBar.addAction(self.actionGround_filter)
@@ -475,4 +486,8 @@ class Ui_MainWindow(object):
         self.actionSetResultsFolder.setText(_translate("MainWindow", "Set Results Folder"))
         self.actionRotationCenter.setText(_translate("MainWindow", "Rotation Center on Double-Click"))
         self.actionRotationCenter.setToolTip(_translate("MainWindow", "Toggle: set nearest on-screen point to cursor as rotation center when left-double-clicking"))
+        self.actionToggleProjection.setText(_translate("MainWindow", "Projection Overlay"))
+        self.actionToggleProjection.setToolTip(_translate("MainWindow", "Toggle projected point overlay in bottom-left area using calibration"))
+        self.actionLoadProjectionConfig.setText(_translate("MainWindow", "Load Projection Calibration"))
+        self.actionLoadProjectionConfig.setToolTip(_translate("MainWindow", "Select calibration.json (camera_to_image, dist, lidar_to_camera) and set image folder"))
 import icons_rc
