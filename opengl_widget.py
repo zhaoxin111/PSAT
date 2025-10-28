@@ -417,7 +417,7 @@ class GLWidget(QGLWidget):
         self.instance_display_state_dict = {}
 
         self.categorys = categorys if categorys is not None else np.zeros(pointcloud.num_point, dtype=np.int16)
-        self.instances = instances if categorys is not None else np.zeros(pointcloud.num_point, dtype=np.int16)
+        self.instances = instances if instances is not None else np.zeros(pointcloud.num_point, dtype=np.int16)
         self.ortho_change_scale = max(pointcloud.size[0] / (self.height() / 5 * 4),
                                       pointcloud.size[1] / (self.height() / 5 * 4))
         self.current_vertices = self.pointcloud.xyz
@@ -554,6 +554,34 @@ class GLWidget(QGLWidget):
         self.instance_color = np.zeros(self.pointcloud.xyz.shape, dtype=np.float32)
         self.instance_color = self.color_map[self.instances]
 
+    def reapply_category_colors(self):
+        """
+        Clamp/validate category indices to current config and refresh category coloring.
+        """
+        if self.pointcloud is None or self.categorys is None:
+            return
+        try:
+            categories = list(self.parent().category_color_dict.keys())
+            n = len(categories)
+            if n == 0:
+                return
+            uncls_index = categories.index('__unclassified__') if '__unclassified__' in categories else 0
+
+            cats = self.categorys.astype(np.int32, copy=False)
+            valid_mask = (cats >= 0) & (cats < n)
+            if not np.all(valid_mask):
+                cats = np.where(valid_mask, cats, uncls_index).astype(np.int16)
+                self.categorys = cats
+
+            # Recompute colors and switch to category view
+            self.category_color_update()
+            self.change_color_to_category()
+            if hasattr(self, 'mainwindow') and self.mainwindow is not None:
+                self.mainwindow.save_state = False
+                self.mainwindow.show_message("Reapplied category colors.", 3000)
+        except Exception as e:
+            if hasattr(self, 'mainwindow') and self.mainwindow is not None:
+                self.mainwindow.show_message(f"Reapply failed: {e}", 5000)
     def mousePressEvent(self, event: QtGui.QMouseEvent):
         self.lastX, self.lastY = event.pos().x(), event.pos().y()
 

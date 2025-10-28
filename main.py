@@ -47,6 +47,19 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.setting_dialog = SettingDialog(self, self)
         self.shortcut_dialog = ShortCutDialog(self)
         self.about_dialog = AboutDialog(self)
+        # Action: Reapply Category Colors
+        self.actionReapplyColors = QtWidgets.QAction(QtGui.QIcon(":/icons/ui/icons/调色盘_platte.svg"), "Reapply Colors", self)
+        self.actionReapplyColors.setObjectName("actionReapplyColors")
+        self.actionReapplyColors.setToolTip("Clamp indices and refresh category colors")
+        self.actionReapplyColors.triggered.connect(self.openGLWidget.reapply_category_colors)
+        try:
+            self.toolBar.addAction(self.actionReapplyColors)
+        except Exception:
+            pass
+        try:
+            self.menuView.addAction(self.actionReapplyColors)
+        except Exception:
+            pass
 
         self.message = QtWidgets.QLabel('')
         self.statusbar.addPermanentWidget(self.message)
@@ -158,6 +171,23 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
                                     categorys = None
                                 if instances.shape[0] != pointcloud.xyz.shape[0]:
                                     instances = None
+                            # Remap category indices from saved file to current config using index_category_dict
+                            try:
+                                index_category_dict = datas.get('index_category_dict', {})
+                                # JSON keys may be strings; normalize to int
+                                index_category_dict = {int(k): v for k, v in index_category_dict.items()}
+                            except Exception:
+                                index_category_dict = {}
+                            if index_category_dict and categorys is not None:
+                                current_categories = list(self.category_color_dict.keys())
+                                uncls_index = current_categories.index('__unclassified__') if '__unclassified__' in current_categories else 0
+                                # Build old_index -> new_index mapping via category name
+                                remap = {
+                                    old: (current_categories.index(cat) if cat in current_categories else uncls_index)
+                                    for old, cat in index_category_dict.items()
+                                }
+                                # Apply remap to loaded category indices
+                                categorys = np.array([remap.get(int(i), uncls_index) for i in categorys.tolist()], dtype=np.int16)
                             break
             if pointcloud.num_point < 1:
                 return
