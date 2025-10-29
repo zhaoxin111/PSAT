@@ -110,6 +110,14 @@ class GLWidget(QGLWidget):
         # Don't block interactions with GL canvas
         self.proj_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
 
+        # GL resource handles to allow proper deletion and avoid leaks
+        self.vertex_vao = None
+        self.vertex_vbos = None
+        self.axes_vbos = None
+        self.circle_vbos = None
+        self.polygon_vaos = None
+        self.polygon_vbos = None
+
     def init_vertex_shader(self):
         vertex_src = """
         # version 330 core
@@ -147,24 +155,43 @@ class GLWidget(QGLWidget):
         glUseProgram(0)
 
     def init_vertex_vao(self):
-        self.vertex_vao = glGenVertexArrays(1)
+        # Ensure we have a current GL context for deletion/creation
+        try:
+            self.makeCurrent()
+        except Exception:
+            pass
 
-        vbos = glGenBuffers(2)
-        glBindBuffer(GL_ARRAY_BUFFER, vbos[0])
+        # Delete previous VAO/VBOs to avoid GPU memory leaks
+        try:
+            if getattr(self, 'vertex_vao', None):
+                glDeleteVertexArrays(1, [self.vertex_vao])
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'vertex_vbos', None):
+                glDeleteBuffers(len(self.vertex_vbos), self.vertex_vbos)
+        except Exception:
+            pass
+
+        # Create fresh VAO/VBOs
+        self.vertex_vao = glGenVertexArrays(1)
+        self.vertex_vbos = glGenBuffers(2)
+
+        glBindBuffer(GL_ARRAY_BUFFER, self.vertex_vbos[0])
         glBufferData(GL_ARRAY_BUFFER, self.current_vertices.nbytes, self.current_vertices, GL_STATIC_DRAW)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-        glBindBuffer(GL_ARRAY_BUFFER, vbos[1])
+        glBindBuffer(GL_ARRAY_BUFFER, self.vertex_vbos[1])
         glBufferData(GL_ARRAY_BUFFER, self.current_colors.nbytes, self.current_colors, GL_STATIC_DRAW)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
         glBindVertexArray(self.vertex_vao)
-        glBindBuffer(GL_ARRAY_BUFFER, vbos[0])
+        glBindBuffer(GL_ARRAY_BUFFER, self.vertex_vbos[0])
         glEnableVertexAttribArray(0)
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, self.current_vertices.itemsize * 3, ctypes.c_void_p(0))
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-        glBindBuffer(GL_ARRAY_BUFFER, vbos[1])
+        glBindBuffer(GL_ARRAY_BUFFER, self.vertex_vbos[1])
         glEnableVertexAttribArray(1)
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, self.current_colors.itemsize * 3, ctypes.c_void_p(0))
         glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -194,6 +221,7 @@ class GLWidget(QGLWidget):
 
         self.axes_vaos = glGenVertexArrays(3)   # xyz轴
         axes_vbos = glGenBuffers(6)
+        self.axes_vbos = axes_vbos
 
         glBindVertexArray(self.axes_vaos[0])  # x轴
         glBindBuffer(GL_ARRAY_BUFFER, axes_vbos[0])
@@ -248,6 +276,7 @@ class GLWidget(QGLWidget):
 
         self.circle_vaos = glGenVertexArrays(3)  # xyz环
         circle_vbos = glGenBuffers(6)
+        self.circle_vbos = circle_vbos
 
         glBindVertexArray(self.circle_vaos[0])  # x环
         glBindBuffer(GL_ARRAY_BUFFER, circle_vbos[0])
@@ -292,23 +321,39 @@ class GLWidget(QGLWidget):
         glBindVertexArray(0)
 
     def init_polygon_vao(self):
-        #
         if self.polygon_vertices is None:
             return
+
+        # Ensure current context; delete previous polygon buffers to avoid leaks
+        try:
+            self.makeCurrent()
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'polygon_vaos', None):
+                glDeleteVertexArrays(1, [self.polygon_vaos])
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'polygon_vbos', None):
+                glDeleteBuffers(len(self.polygon_vbos), self.polygon_vbos)
+        except Exception:
+            pass
+
         polygon_vertices = np.array(self.polygon_vertices, dtype=np.float32)
         self.polygon_colors = np.array([0.5, 0.5, 0.5] * polygon_vertices.shape[0], dtype=np.uint16)
 
         self.polygon_vaos = glGenVertexArrays(1)
-        polygon_vbos = glGenBuffers(2)
+        self.polygon_vbos = glGenBuffers(2)
 
         glBindVertexArray(self.polygon_vaos)
-        glBindBuffer(GL_ARRAY_BUFFER, polygon_vbos[0])
+        glBindBuffer(GL_ARRAY_BUFFER, self.polygon_vbos[0])
         glBufferData(GL_ARRAY_BUFFER, polygon_vertices.nbytes, polygon_vertices, GL_STREAM_DRAW)
         glEnableVertexAttribArray(0)
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, polygon_vertices.itemsize * 3, ctypes.c_void_p(0))
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-        glBindBuffer(GL_ARRAY_BUFFER, polygon_vbos[1])
+        glBindBuffer(GL_ARRAY_BUFFER, self.polygon_vbos[1])
         glBufferData(GL_ARRAY_BUFFER, self.polygon_colors.nbytes, self.polygon_colors, GL_STREAM_DRAW)
         glEnableVertexAttribArray(1)
         glVertexAttribPointer(1, 3, GL_UNSIGNED_SHORT, GL_FALSE, self.polygon_colors.itemsize * 3, ctypes.c_void_p(0))
@@ -420,6 +465,39 @@ class GLWidget(QGLWidget):
         self.update()
 
     def reset(self):
+        # Free per-cloud GPU buffers (VAO/VBO) to prevent accumulation across loads/filters
+        try:
+            self.makeCurrent()
+        except Exception:
+            pass
+        # Delete vertex VAO/VBOs
+        try:
+            if getattr(self, 'vertex_vao', None):
+                glDeleteVertexArrays(1, [self.vertex_vao])
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'vertex_vbos', None):
+                glDeleteBuffers(len(self.vertex_vbos), self.vertex_vbos)
+        except Exception:
+            pass
+        self.vertex_vao = None
+        self.vertex_vbos = None
+        # Delete polygon VAO/VBOs
+        try:
+            if getattr(self, 'polygon_vaos', None):
+                glDeleteVertexArrays(1, [self.polygon_vaos])
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'polygon_vbos', None):
+                glDeleteBuffers(len(self.polygon_vbos), self.polygon_vbos)
+        except Exception:
+            pass
+        self.polygon_vaos = None
+        self.polygon_vbos = None
+
+        # Reset data references to release CPU memory
         self.pointcloud = None
         self.mask:np.ndarray = None
         self.current_vertices: np.ndarray = None
@@ -430,6 +508,7 @@ class GLWidget(QGLWidget):
         self.categorys:np.ndarray = None
         self.instances:np.ndarray = None
 
+        # Reset transforms and viewport scale
         self.vertex_transform.__init__()
         self.circle_transform.__init__()
         self.camera.__init__()
