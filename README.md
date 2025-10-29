@@ -14,6 +14,8 @@ step2: 点击projection overlay即可显示投影结果;取消选中该按钮可
 step3: 通过CTRL+鼠标滚轮调节图片大小;通过SHIFT+鼠标滚轮调节投影点大小.
 ![example](example/pic/example.png)
 
+9. 修复拖拽，旋转，标注点云时RAM持续增长问题，在开启投影点可视化现可稳定在80M RAM占用.
+
 # [PSAT](http://www.yatenglg.cn/psat) - 点云分割标注工具
 ![psat.png](example/pic/标注.gif)
 

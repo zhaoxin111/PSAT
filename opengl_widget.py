@@ -117,6 +117,12 @@ class GLWidget(QGLWidget):
         self.circle_vbos = None
         self.polygon_vaos = None
         self.polygon_vbos = None
+        # Track whether the polygon VBO/VAO needs rebuilding and current vertex count
+        self._polygon_dirty = False
+        self._polygon_count = 0
+        # Reusable VBO capacity (bytes) for main point buffers to avoid driver reallocations
+        self._vertex_capacity_bytes = 0
+        self._color_capacity_bytes = 0
 
     def init_vertex_shader(self):
         vertex_src = """
@@ -155,43 +161,57 @@ class GLWidget(QGLWidget):
         glUseProgram(0)
 
     def init_vertex_vao(self):
-        # Ensure we have a current GL context for deletion/creation
+        """
+        Reuse VAO/VBOs and update contents in-place to avoid per-update reallocation.
+        Grows buffer capacity geometrically to reduce driver-side fragmentation and RAM growth.
+        """
+        if self.current_vertices is None or self.current_colors is None:
+            return
         try:
             self.makeCurrent()
         except Exception:
             pass
 
-        # Delete previous VAO/VBOs to avoid GPU memory leaks
-        try:
-            if getattr(self, 'vertex_vao', None):
-                glDeleteVertexArrays(1, [self.vertex_vao])
-        except Exception:
-            pass
-        try:
-            if getattr(self, 'vertex_vbos', None):
-                glDeleteBuffers(len(self.vertex_vbos), self.vertex_vbos)
-        except Exception:
-            pass
-
-        # Create fresh VAO/VBOs
-        self.vertex_vao = glGenVertexArrays(1)
-        self.vertex_vbos = glGenBuffers(2)
-
-        glBindBuffer(GL_ARRAY_BUFFER, self.vertex_vbos[0])
-        glBufferData(GL_ARRAY_BUFFER, self.current_vertices.nbytes, self.current_vertices, GL_STATIC_DRAW)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-
-        glBindBuffer(GL_ARRAY_BUFFER, self.vertex_vbos[1])
-        glBufferData(GL_ARRAY_BUFFER, self.current_colors.nbytes, self.current_colors, GL_STATIC_DRAW)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        # Lazily create VAO/VBOs
+        if getattr(self, 'vertex_vao', None) is None:
+            self.vertex_vao = glGenVertexArrays(1)
+        if getattr(self, 'vertex_vbos', None) is None:
+            self.vertex_vbos = glGenBuffers(2)
+            # Initialize capacities as zero for first-time allocation
+            self._vertex_capacity_bytes = 0
+            self._color_capacity_bytes = 0
 
         glBindVertexArray(self.vertex_vao)
+
+        # Helper: grow-to-fit capacity (geometric growth)
+        def _grow_capacity(cur: int, need: int) -> int:
+            if cur >= need:
+                return cur
+            new_cap = max(need, cur * 2 if cur > 0 else 1)
+            # Round up to nearest 256 bytes to help driver allocation buckets
+            rem = new_cap % 256
+            if rem:
+                new_cap += (256 - rem)
+            return new_cap
+
+        # Update positions buffer
         glBindBuffer(GL_ARRAY_BUFFER, self.vertex_vbos[0])
+        needed_pos = int(self.current_vertices.nbytes)
+        if self._vertex_capacity_bytes < needed_pos:
+            self._vertex_capacity_bytes = _grow_capacity(self._vertex_capacity_bytes, needed_pos)
+            glBufferData(GL_ARRAY_BUFFER, self._vertex_capacity_bytes, None, GL_DYNAMIC_DRAW)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, needed_pos, self.current_vertices)
         glEnableVertexAttribArray(0)
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, self.current_vertices.itemsize * 3, ctypes.c_void_p(0))
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
+        # Update colors buffer
         glBindBuffer(GL_ARRAY_BUFFER, self.vertex_vbos[1])
+        needed_col = int(self.current_colors.nbytes)
+        if self._color_capacity_bytes < needed_col:
+            self._color_capacity_bytes = _grow_capacity(self._color_capacity_bytes, needed_col)
+            glBufferData(GL_ARRAY_BUFFER, self._color_capacity_bytes, None, GL_DYNAMIC_DRAW)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, needed_col, self.current_colors)
         glEnableVertexAttribArray(1)
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, self.current_colors.itemsize * 3, ctypes.c_void_p(0))
         glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -321,44 +341,68 @@ class GLWidget(QGLWidget):
         glBindVertexArray(0)
 
     def init_polygon_vao(self):
-        if self.polygon_vertices is None:
+        """
+        Create polygon VAO/VBO once and update contents dynamically to avoid per-frame reallocations.
+        Uses GL_DYNAMIC_DRAW and glBufferSubData for incremental updates.
+        """
+        if self.polygon_vertices is None or len(self.polygon_vertices) < 2:
             return
 
-        # Ensure current context; delete previous polygon buffers to avoid leaks
+        # Ensure current GL context
         try:
             self.makeCurrent()
         except Exception:
             pass
-        try:
-            if getattr(self, 'polygon_vaos', None):
-                glDeleteVertexArrays(1, [self.polygon_vaos])
-        except Exception:
-            pass
-        try:
-            if getattr(self, 'polygon_vbos', None):
-                glDeleteBuffers(len(self.polygon_vbos), self.polygon_vbos)
-        except Exception:
-            pass
 
         polygon_vertices = np.array(self.polygon_vertices, dtype=np.float32)
-        self.polygon_colors = np.array([0.5, 0.5, 0.5] * polygon_vertices.shape[0], dtype=np.uint16)
+        self._polygon_count = int(polygon_vertices.shape[0])
+        self.polygon_colors = np.array([0.5, 0.5, 0.5] * self._polygon_count, dtype=np.uint16)
 
-        self.polygon_vaos = glGenVertexArrays(1)
-        self.polygon_vbos = glGenBuffers(2)
+        # Create VAO/VBOs if not existing
+        if getattr(self, 'polygon_vaos', None) is None or getattr(self, 'polygon_vbos', None) is None:
+            self.polygon_vaos = glGenVertexArrays(1)
+            self.polygon_vbos = glGenBuffers(2)
 
-        glBindVertexArray(self.polygon_vaos)
-        glBindBuffer(GL_ARRAY_BUFFER, self.polygon_vbos[0])
-        glBufferData(GL_ARRAY_BUFFER, polygon_vertices.nbytes, polygon_vertices, GL_STREAM_DRAW)
-        glEnableVertexAttribArray(0)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, polygon_vertices.itemsize * 3, ctypes.c_void_p(0))
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glBindVertexArray(self.polygon_vaos)
 
-        glBindBuffer(GL_ARRAY_BUFFER, self.polygon_vbos[1])
-        glBufferData(GL_ARRAY_BUFFER, self.polygon_colors.nbytes, self.polygon_colors, GL_STREAM_DRAW)
-        glEnableVertexAttribArray(1)
-        glVertexAttribPointer(1, 3, GL_UNSIGNED_SHORT, GL_FALSE, self.polygon_colors.itemsize * 3, ctypes.c_void_p(0))
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glBindVertexArray(0)
+            # Positions VBO
+            glBindBuffer(GL_ARRAY_BUFFER, self.polygon_vbos[0])
+            glBufferData(GL_ARRAY_BUFFER, polygon_vertices.nbytes, polygon_vertices, GL_DYNAMIC_DRAW)
+            glEnableVertexAttribArray(0)
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, polygon_vertices.itemsize * 3, ctypes.c_void_p(0))
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+            # Colors VBO
+            glBindBuffer(GL_ARRAY_BUFFER, self.polygon_vbos[1])
+            glBufferData(GL_ARRAY_BUFFER, self.polygon_colors.nbytes, self.polygon_colors, GL_DYNAMIC_DRAW)
+            glEnableVertexAttribArray(1)
+            glVertexAttribPointer(1, 3, GL_UNSIGNED_SHORT, GL_FALSE, self.polygon_colors.itemsize * 3, ctypes.c_void_p(0))
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+            glBindVertexArray(0)
+        else:
+            # Update existing buffers in-place
+            glBindBuffer(GL_ARRAY_BUFFER, self.polygon_vbos[0])
+            size_bytes = polygon_vertices.nbytes
+            # Reallocate if capacity changed, otherwise update subrange
+            current_size = glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_SIZE)
+            if current_size != size_bytes:
+                glBufferData(GL_ARRAY_BUFFER, size_bytes, polygon_vertices, GL_DYNAMIC_DRAW)
+            else:
+                glBufferSubData(GL_ARRAY_BUFFER, 0, size_bytes, polygon_vertices)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+            glBindBuffer(GL_ARRAY_BUFFER, self.polygon_vbos[1])
+            color_bytes = self.polygon_colors.nbytes
+            current_csize = glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_SIZE)
+            if current_csize != color_bytes:
+                glBufferData(GL_ARRAY_BUFFER, color_bytes, self.polygon_colors, GL_DYNAMIC_DRAW)
+            else:
+                glBufferSubData(GL_ARRAY_BUFFER, 0, color_bytes, self.polygon_colors)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+        # Mark clean
+        self._polygon_dirty = False
 
     def initializeGL(self):
         self.init_vertex_shader()
@@ -389,15 +433,16 @@ class GLWidget(QGLWidget):
             glDrawArrays(GL_POINTS, 0, int(self.current_vertices.nbytes / self.current_vertices.itemsize/3))
             glUseProgram(0)
 
-        if self.polygon_vertices is not None:
+        if self.polygon_vertices and len(self.polygon_vertices) > 1:
             glUseProgram(self.vertex_shader)
             glUniformMatrix4fv(self.model_loc, 1, GL_FALSE, self.keep_transform.toMatrix().data())
             glUniformMatrix4fv(self.view_loc, 1, GL_FALSE, self.camera.toMatrix().data())
 
-            self.init_polygon_vao()
-            glBindVertexArray(self.polygon_vaos)
-            polygon_vertices = np.array(self.polygon_vertices, dtype=np.float32)
-            glDrawArrays(GL_LINE_STRIP, 0, int(polygon_vertices.nbytes / polygon_vertices.itemsize / 3))
+            if getattr(self, '_polygon_dirty', False):
+                self.init_polygon_vao()
+            if getattr(self, 'polygon_vaos', None):
+                glBindVertexArray(self.polygon_vaos)
+                glDrawArrays(GL_LINE_STRIP, 0, int(getattr(self, '_polygon_count', 0)))
             glUseProgram(0)
 
     def paintAxes(self):
@@ -483,6 +528,9 @@ class GLWidget(QGLWidget):
             pass
         self.vertex_vao = None
         self.vertex_vbos = None
+        # Reset VBO capacities so next allocation can grow appropriately
+        self._vertex_capacity_bytes = 0
+        self._color_capacity_bytes = 0
         # Delete polygon VAO/VBOs
         try:
             if getattr(self, 'polygon_vaos', None):
@@ -541,12 +589,16 @@ class GLWidget(QGLWidget):
         self.filter_mode = False
         if self.mode == MODE.VIEW_MODE:
             self.mode = MODE.DRAW_MODE
-        self.polygon_vertices = []
+            self.polygon_vertices = []
+            self._polygon_dirty = False
+            self._polygon_count = 0
 
     def change_mode_to_view(self):
         if self.mode == MODE.DRAW_MODE:
             self.mode = MODE.VIEW_MODE
             self.polygon_vertices = []
+            self._polygon_dirty = False
+            self._polygon_count = 0
 
     def toggle_filter_mode(self):
         """
@@ -601,6 +653,8 @@ class GLWidget(QGLWidget):
                 # Enter filter drawing mode
                 self.filter_mode = True
                 self.polygon_vertices = []
+                self._polygon_dirty = False
+                self._polygon_count = 0
                 self.mode = MODE.DRAW_MODE
 
     def change_color_to_rgb(self):
@@ -711,8 +765,10 @@ class GLWidget(QGLWidget):
 
                 if not self.polygon_vertices:
                     self.polygon_vertices = [[x, y, 10000], [x, y, 10000], [x, y, 10000]]
+                    self._polygon_dirty = True
                 else:
                     self.polygon_vertices.insert(-1, [x, y, 10000])
+                    self._polygon_dirty = True
             elif event.button() == QtCore.Qt.MouseButton.RightButton:
                 if self.filter_mode:
                     self.apply_polygon_filter()
@@ -759,6 +815,7 @@ class GLWidget(QGLWidget):
 
             if len(self.polygon_vertices) > 2 :
                 self.polygon_vertices[-2] = [x, y, 10000]   # 更新当前点
+                self._polygon_dirty = True
 
         self.update()
 
@@ -811,24 +868,28 @@ class GLWidget(QGLWidget):
         rect = polygon.boundingRect()
 
         # Project all vertices (unmasked) to 2D screen space
-        projection = np.array(self.projection.data()).reshape(4, 4)
-        camera = np.array(self.camera.toMatrix().data()).reshape(4, 4)
-        vertex_transform = np.array(self.vertex_transform.toMatrix().data()).reshape(4, 4)
-        verts = np.hstack((self.pointcloud.xyz, np.ones((self.pointcloud.xyz.shape[0], 1), dtype=np.float32)))
-        verts2model = verts.dot(vertex_transform.dot(camera))
+        projection = np.array(self.projection.data(), dtype=np.float32).reshape(4, 4)
+        camera = np.array(self.camera.toMatrix().data(), dtype=np.float32).reshape(4, 4)
+        vertex_transform = np.array(self.vertex_transform.toMatrix().data(), dtype=np.float32).reshape(4, 4)
+        verts = np.hstack((self.pointcloud.xyz.astype(np.float32), np.ones((self.pointcloud.xyz.shape[0], 1), dtype=np.float32)))
+        m_model = vertex_transform.dot(camera)
+        verts2model = verts.dot(m_model)
         verts2projection = verts2model.dot(projection)
-        xys = verts2projection[:, :2]
-        xys = xys + np.array((1, -1))
-        xys = xys * np.array((self.width() / 2, self.height() / 2)) + 1.0
-        xys = xys * np.array((1, -1))
+        xys = verts2projection[:, :2].astype(np.float32)
+        xys += np.array((1, -1), dtype=np.float32)
+        xys = xys * np.array((self.width() / 2, self.height() / 2), dtype=np.float32) + np.float32(1.0)
+        xys *= np.array((1, -1), dtype=np.float32)
 
         l, r, t, b = rect.x(), rect.x() + rect.width(), rect.y(), rect.y() + rect.height()
         mask1 = (l < xys[:, 0]) & (xys[:, 0] < r) & (t < xys[:, 1]) & (xys[:, 1] < b)
-        mask2 = [polygon.containsPoint(QPointF(p[0], p[1]), QtCore.Qt.FillRule.WindingFill) for p in xys[mask1]]
-        mask1[mask1 == True] = mask2
+        # Evaluate point-in-polygon only on candidates and assign into a fresh boolean array to avoid large in-place list coercions
+        mask2_list = [polygon.containsPoint(QPointF(p[0], p[1]), QtCore.Qt.FillRule.WindingFill) for p in xys[mask1]]
+        mask2 = np.asarray(mask2_list, dtype=bool)
+        mask_selected = np.zeros(self.pointcloud.xyz.shape[0], dtype=bool)
+        mask_selected[mask1] = mask2
 
         # Set mask to selected points only
-        self.mask = mask1
+        self.mask = mask_selected
 
         # Exit draw mode
         self.change_mode_to_view()
@@ -836,6 +897,8 @@ class GLWidget(QGLWidget):
         self.is_filtered = True
         self.filter_mode = False
         self.polygon_vertices = []
+        self._polygon_dirty = False
+        self._polygon_count = 0
 
         # Refresh display to reflect new mask
         if self.display == DISPLAY.ELEVATION:
@@ -1064,18 +1127,19 @@ class GLWidget(QGLWidget):
         if self.pointcloud is None:
             return
         # 转numpy便于计算
-        projection = np.array(self.projection.data()).reshape(4, 4)
-        camera = np.array(self.camera.toMatrix().data()).reshape(4, 4)
-        vertex_transform = np.array(self.vertex_transform.toMatrix().data()).reshape(4, 4)
-        # 添加维度
-        vertexs = np.hstack((self.current_vertices, np.ones(shape=(self.current_vertices.shape[0], 1))))
-        vertexs2model = vertexs.dot(vertex_transform.dot(camera))
+        projection = np.array(self.projection.data(), dtype=np.float32).reshape(4, 4)
+        camera = np.array(self.camera.toMatrix().data(), dtype=np.float32).reshape(4, 4)
+        vertex_transform = np.array(self.vertex_transform.toMatrix().data(), dtype=np.float32).reshape(4, 4)
+        # 添加维度 (float32 to reduce temp memory)
+        vertexs = np.hstack((self.current_vertices.astype(np.float32), np.ones((self.current_vertices.shape[0], 1), dtype=np.float32)))
+        m_model = vertex_transform.dot(camera)
+        vertexs2model = vertexs.dot(m_model)
         vertexs2projection = vertexs2model.dot(projection)
         # 转换到屏幕坐标
-        xys = vertexs2projection[:, :2]
-        xys = xys + np.array((1, -1))
-        xys = xys * np.array((self.width() / 2, self.height() / 2)) + 1.0
-        xys = xys * np.array((1, -1))
+        xys = vertexs2projection[:, :2].astype(np.float32)
+        xys += np.array((1, -1), dtype=np.float32)
+        xys = xys * np.array((self.width() / 2, self.height() / 2), dtype=np.float32) + np.float32(1.0)
+        xys *= np.array((1, -1), dtype=np.float32)
         return xys
 
     def save_windows_to_pic(self):
