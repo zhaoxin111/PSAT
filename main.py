@@ -14,7 +14,7 @@ from widgets.category_choice_dialog import CategoryChoiceDialog
 from widgets.setting_dialog import SettingDialog
 from widgets.about_dialog import AboutDialog
 from widgets.shortcut_doalog import ShortCutDialog
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from configs import load_config, save_config, DEFAULT_CONFIG_FILE, MODE, DISPLAY
 from json import load, dump
 import functools
@@ -106,6 +106,8 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.preanno_enabled = False
         self.preanno_radius = 0.4
         self.preanno_k = 3
+        self.preanno_window_k = 3
+        self._annot_cache_deque = deque(maxlen=self.preanno_window_k)
         self._prev_annot_cache = None
 
     def open_file(self):
@@ -116,6 +118,12 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         if file:
             if not self.close_point_cloud():
                 return
+            # Reset pre-annotation window for a new sequence
+            try:
+                self._annot_cache_deque.clear()
+                self._prev_annot_cache = None
+            except Exception:
+                pass
             self.current_root = os.path.split(file)[0]
             self.current_file = file
             self.point_cloud_read_thread_start(file)
@@ -124,6 +132,13 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         dir = QtWidgets.QFileDialog.getExistingDirectory(self)
         if dir:
             self.close_point_cloud()
+
+            # Reset pre-annotation window when a new folder is opened
+            try:
+                self._annot_cache_deque.clear()
+                self._prev_annot_cache = None
+            except Exception:
+                pass
 
             self.dockWidget_files.setVisible(True)
             self.listWidget_files.clear()
@@ -214,11 +229,12 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
                         hit, total = stats.get('hit', 0), stats.get('total', 0)
                         used_r = stats.get('used_radius', self.preanno_radius)
                         mode = stats.get('mode', 'world')
+                        frames_used = stats.get('frames_used', 1)
                         try:
                             msg_r = f"{used_r:.3f}" if used_r is not None else "n/a"
                         except Exception:
                             msg_r = str(used_r)
-                        self.show_message(f"Pre-annotate ({mode}): {hit}/{total} voted, r~{msg_r}, k={self.preanno_k}", 4000)
+                        self.show_message(f"Pre-annotate ({mode}): {hit}/{total} voted, r~{msg_r}, k={self.preanno_k}, frames={frames_used}", 4000)
                 except Exception as e:
                     self.show_message(f"Pre-annotate failed: {e}", 5000)
 
@@ -320,6 +336,13 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.actionPick.setEnabled(False)
         self.actionCachePick.setEnabled(False)
+
+        # Clear pre-annotation caches when closing current sample/sequence
+        try:
+            self._annot_cache_deque.clear()
+            self._prev_annot_cache = None
+        except Exception:
+            pass
         return True
 
     def open_backgrpund_color_dialog(self):
@@ -648,28 +671,75 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.current_file = target_path
         self.point_cloud_read_thread_start(target_path)
 
+    def set_preanno_window(self):
+        """
+        Prompt user to set K (number of previous frames to accumulate for pre-annotation).
+        """
+        try:
+            val, ok = QtWidgets.QInputDialog.getInt(self, "Pre-annotate Window Size", "K (frames):",
+                                                    value=int(getattr(self, 'preanno_window_k', 3)),
+                                                    min=1, max=50)
+            if not ok:
+                return
+            self.preanno_window_k = int(val)
+            # Rebuild deque with new maxlen while keeping most recent caches
+            old = list(getattr(self, '_annot_cache_deque', []))
+            self._annot_cache_deque = deque(maxlen=self.preanno_window_k)
+            if old:
+                for c in old[-self.preanno_window_k:]:
+                    self._annot_cache_deque.append(c)
+            self.show_message(f"Pre-annotate window K set to {self.preanno_window_k}")
+        except Exception as e:
+            self.show_message(f"Failed to set window size: {e}", 5000)
+
     def _preannotate_from_prev(self, pointcloud, radius: float, k: int):
         """
-        Pre-annotate current pointcloud using previous frame annotated points via voxel-hash radius-KNN voting.
+        Pre-annotate using accumulated annotations from up to K previous frames (user-defined window).
         Strategy:
-          1) Try world coordinates (xyz + offset) with progressive radii.
-          2) If too few hits, fallback to local coordinates (xyz) with progressive radii.
+          1) Concatenate annotated points from the last K frames (skip empty frames).
+          2) Try world coordinates (xyz + offset) first with progressive radii.
+          3) If coverage too low, fallback to local (xyz) with progressive radii.
         Returns (categorys, instances, stats dict).
         """
         import math
-        prev = getattr(self, '_prev_annot_cache', None)
-        if prev is None or prev.get('cats') is None or prev.get('ins') is None:
-            # No cache available
-            N0 = self.openGLWidget.pointcloud.num_point if self.openGLWidget.pointcloud is not None else 0
-            return None, None, {'total': N0, 'hit': 0, 'used_radius': None, 'mode': None}
 
-        prev_world = prev.get('xyz_world', prev.get('xyz'))
-        prev_local = prev.get('xyz_local', None)
-        prev_cats = prev['cats']
-        prev_ins = prev['ins']
+        # Collect caches from deque (up to K frames)
+        caches = list(getattr(self, '_annot_cache_deque', []))
+        non_empty = []
+        for c in caches:
+            try:
+                n = int(c.get('cats', np.empty((0,), dtype=np.int16)).shape[0])
+                if n > 0:
+                    non_empty.append(c)
+            except Exception:
+                continue
+        frames_used = len(non_empty)
+
+        N = pointcloud.xyz.shape[0]
+        if frames_used == 0:
+            return None, None, {'total': N, 'hit': 0, 'used_radius': None, 'mode': None, 'frames_used': 0}
+
+        # Concatenate world/local coords and labels
+        concat_world = []
+        concat_local = []
+        concat_cats = []
+        concat_ins = []
+        for c in non_empty:
+            if 'xyz_world' in c:
+                concat_world.append(c['xyz_world'])
+            elif 'xyz' in c:
+                concat_world.append(c['xyz'])
+            if 'xyz_local' in c:
+                concat_local.append(c['xyz_local'])
+            concat_cats.append(c['cats'])
+            concat_ins.append(c['ins'])
+
+        prev_world = np.concatenate(concat_world, axis=0) if len(concat_world) > 0 else None
+        prev_local = np.concatenate(concat_local, axis=0) if len(concat_local) > 0 else None
+        prev_cats = np.concatenate(concat_cats, axis=0)
+        prev_ins = np.concatenate(concat_ins, axis=0)
 
         # Prepare outputs
-        N = pointcloud.xyz.shape[0]
         try:
             cats_list = list(self.category_color_dict.keys())
             uncls_index = cats_list.index('__unclassified__')
@@ -677,15 +747,10 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
             uncls_index = 0
 
         def run_with(prev_xyz: np.ndarray, curr_xyz: np.ndarray, base_radius: float):
-            """
-            Build voxel hash on prev_xyz, vote for labels of curr_xyz within radius, with progressive widening.
-            Returns hits, used_radius, cats_out, ins_out.
-            """
             cats_out = np.full(N, uncls_index, dtype=np.int16)
             ins_out = np.zeros(N, dtype=np.int16)
 
             def pass_once(rr: float):
-                # Build buckets for prev_xyz
                 rr = float(max(1e-6, rr))
                 cell = rr * 0.75
                 inv = 1.0 / cell
@@ -741,7 +806,6 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
                     hits_local += 1
                 return hits_local
 
-            # Try widening radii
             used_r = None
             hits_total = 0
             for scale in (1.0, 2.0, 4.0, 8.0):
@@ -752,30 +816,36 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
                     break
             return hits_total, used_r, cats_out, ins_out
 
-        # Attempt world coordinates first (if available)
         best_mode = None
         best_hits = -1
         best_r = None
         best_cats = None
         best_ins = None
 
-        if prev_world is not None:
-            curr_world = pointcloud.xyz + pointcloud.offset
+        # World coordinates first if available
+        if prev_world is not None and prev_world.shape[0] > 0:
+            curr_world = (pointcloud.xyz + pointcloud.offset).astype(np.float32, copy=False)
             hits_w, r_w, cats_w, ins_w = run_with(prev_world.astype(np.float32, copy=False),
-                                                  curr_world.astype(np.float32, copy=False),
+                                                  curr_world,
                                                   radius)
             best_mode, best_hits, best_r, best_cats, best_ins = 'world', hits_w, r_w, cats_w, ins_w
 
-        # Fallback to local coordinates if coverage is too low
-        if (best_hits < max(1, int(0.01 * N))) and (prev_local is not None):
-            curr_local = pointcloud.xyz
+        # Fallback to local
+        if (best_hits < max(1, int(0.01 * N))) and (prev_local is not None) and (prev_local.shape[0] > 0):
+            curr_local = pointcloud.xyz.astype(np.float32, copy=False)
             hits_l, r_l, cats_l, ins_l = run_with(prev_local.astype(np.float32, copy=False),
-                                                  curr_local.astype(np.float32, copy=False),
+                                                  curr_local,
                                                   radius)
             if hits_l >= best_hits:
                 best_mode, best_hits, best_r, best_cats, best_ins = 'local', hits_l, r_l, cats_l, ins_l
 
-        return best_cats, best_ins, {'total': N, 'hit': int(max(0, best_hits)), 'used_radius': best_r, 'mode': best_mode}
+        return best_cats, best_ins, {
+            'total': N,
+            'hit': int(max(0, best_hits)),
+            'used_radius': best_r,
+            'mode': best_mode,
+            'frames_used': frames_used
+        }
 
     def _update_prev_cache(self):
         """
@@ -804,6 +874,7 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 'cats': np.empty((0,), dtype=np.int16),
                 'ins': np.empty((0,), dtype=np.int16)
             }
+            # Do not enqueue empty caches; keep window slots for annotated frames only
             return
         xyz_world_masked = xyz_world[mask].astype(np.float32, copy=False)
         xyz_local_masked = self.openGLWidget.pointcloud.xyz[mask].astype(np.float32, copy=False)
@@ -814,6 +885,20 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
             'cats': cats[mask].astype(np.int16, copy=False),
             'ins': ins[mask].astype(np.int16, copy=False)
         }
+        # Push current frame's annotated subset into the pre-annotation window (dedupe by file)
+        try:
+            dq = getattr(self, '_annot_cache_deque', None)
+            if dq is not None:
+                try:
+                    # include file id to avoid duplicates
+                    self._prev_annot_cache['file'] = self.current_file
+                except Exception:
+                    pass
+                if len(dq) > 0 and dq[-1].get('file', None) == self._prev_annot_cache.get('file', None):
+                    dq.pop()
+                dq.append(self._prev_annot_cache)
+        except Exception:
+            pass
 
     def init_connect(self):
         self.actionOpen.triggered.connect(self.open_file)
@@ -851,6 +936,8 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Pre-annotation toggle
         if hasattr(self, 'actionPreAnnotate'):
             self.actionPreAnnotate.toggled.connect(lambda checked: setattr(self, 'preanno_enabled', checked))
+        if hasattr(self, 'actionPreAnnotateWindow'):
+            self.actionPreAnnotateWindow.triggered.connect(self.set_preanno_window)
         # Projection overlay actions
         if hasattr(self, 'actionToggleProjection'):
             self.actionToggleProjection.toggled.connect(self.openGLWidget.set_projection_enabled)
