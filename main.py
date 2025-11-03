@@ -102,6 +102,12 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.next_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("D"), self)
         self.next_shortcut.activated.connect(self.go_next_pointcloud)
 
+        # Pre-annotation defaults
+        self.preanno_enabled = False
+        self.preanno_radius = 0.4
+        self.preanno_k = 3
+        self._prev_annot_cache = None
+
     def open_file(self):
         self.dockWidget_files.setVisible(False)
         self.listWidget_files.clear()
@@ -131,6 +137,11 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 self.listWidget_files.addItem(item)
 
     def double_click_files_widget(self, item:QtWidgets.QListWidgetItem):
+        # Capture current annotations before switching
+        try:
+            self._update_prev_cache()
+        except Exception:
+            pass
         file_path = os.path.join(self.current_root, item.text())
         self.current_file = file_path
         self.point_cloud_read_thread_start(file_path)
@@ -193,6 +204,24 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
             if pointcloud.num_point < 1:
                 return
 
+            # If no labels found on disk and pre-annotation is enabled, try to propagate from previous frame
+            if categorys is None and instances is None and getattr(self, 'preanno_enabled', False):
+                try:
+                    cats_pred, ins_pred, stats = self._preannotate_from_prev(pointcloud, self.preanno_radius, self.preanno_k)
+                    if cats_pred is not None and ins_pred is not None:
+                        categorys, instances = cats_pred, ins_pred
+                        self.save_state = False  # dirty; produced pre-annotations
+                        hit, total = stats.get('hit', 0), stats.get('total', 0)
+                        used_r = stats.get('used_radius', self.preanno_radius)
+                        mode = stats.get('mode', 'world')
+                        try:
+                            msg_r = f"{used_r:.3f}" if used_r is not None else "n/a"
+                        except Exception:
+                            msg_r = str(used_r)
+                        self.show_message(f"Pre-annotate ({mode}): {hit}/{total} voted, r~{msg_r}, k={self.preanno_k}", 4000)
+                except Exception as e:
+                    self.show_message(f"Pre-annotate failed: {e}", 5000)
+
             self.openGLWidget.load_vertices(pointcloud, categorys, instances)
             #
             self.label_num_point.setText('{}'.format(pointcloud.num_point))
@@ -207,6 +236,12 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.actionPick.setEnabled(True)
             self.actionCachePick.setEnabled(True)
             self.actionFilter.setEnabled(True)
+
+            # After loading current, update previous-frame annotation cache for next propagation
+            try:
+                self._update_prev_cache()
+            except Exception:
+                pass
 
             # Update projection overlay if enabled
             try:
@@ -578,6 +613,11 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         """
         if self.current_root is None:
             return
+        # Capture current annotations before switching files
+        try:
+            self._update_prev_cache()
+        except Exception:
+            pass
         try:
             files = [f for f in os.listdir(self.current_root) if not f.endswith('.json')]
         except Exception:
@@ -607,6 +647,173 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.current_file = target_path
         self.point_cloud_read_thread_start(target_path)
+
+    def _preannotate_from_prev(self, pointcloud, radius: float, k: int):
+        """
+        Pre-annotate current pointcloud using previous frame annotated points via voxel-hash radius-KNN voting.
+        Strategy:
+          1) Try world coordinates (xyz + offset) with progressive radii.
+          2) If too few hits, fallback to local coordinates (xyz) with progressive radii.
+        Returns (categorys, instances, stats dict).
+        """
+        import math
+        prev = getattr(self, '_prev_annot_cache', None)
+        if prev is None or prev.get('cats') is None or prev.get('ins') is None:
+            # No cache available
+            N0 = self.openGLWidget.pointcloud.num_point if self.openGLWidget.pointcloud is not None else 0
+            return None, None, {'total': N0, 'hit': 0, 'used_radius': None, 'mode': None}
+
+        prev_world = prev.get('xyz_world', prev.get('xyz'))
+        prev_local = prev.get('xyz_local', None)
+        prev_cats = prev['cats']
+        prev_ins = prev['ins']
+
+        # Prepare outputs
+        N = pointcloud.xyz.shape[0]
+        try:
+            cats_list = list(self.category_color_dict.keys())
+            uncls_index = cats_list.index('__unclassified__')
+        except Exception:
+            uncls_index = 0
+
+        def run_with(prev_xyz: np.ndarray, curr_xyz: np.ndarray, base_radius: float):
+            """
+            Build voxel hash on prev_xyz, vote for labels of curr_xyz within radius, with progressive widening.
+            Returns hits, used_radius, cats_out, ins_out.
+            """
+            cats_out = np.full(N, uncls_index, dtype=np.int16)
+            ins_out = np.zeros(N, dtype=np.int16)
+
+            def pass_once(rr: float):
+                # Build buckets for prev_xyz
+                rr = float(max(1e-6, rr))
+                cell = rr * 0.75
+                inv = 1.0 / cell
+
+                def hkey(p):
+                    return (int(math.floor(p[0] * inv)),
+                            int(math.floor(p[1] * inv)),
+                            int(math.floor(p[2] * inv)))
+
+                buckets = {}
+                for i in range(prev_xyz.shape[0]):
+                    key = hkey(prev_xyz[i])
+                    lst = buckets.get(key)
+                    if lst is None:
+                        buckets[key] = [i]
+                    else:
+                        lst.append(i)
+
+                r_cells = int(math.ceil(rr / cell))
+                nbr_offsets = [(dx, dy, dz)
+                               for dx in range(-r_cells, r_cells + 1)
+                               for dy in range(-r_cells, r_cells + 1)
+                               for dz in range(-r_cells, r_cells + 1)]
+                r2 = rr * rr
+                kk = int(max(1, k))
+                hits_local = 0
+
+                for i in range(N):
+                    p = curr_xyz[i]
+                    base = hkey(p)
+                    cand_idx = []
+                    for off in nbr_offsets:
+                        key = (base[0] + off[0], base[1] + off[1], base[2] + off[2])
+                        if key in buckets:
+                            cand_idx.extend(buckets[key])
+                    if not cand_idx:
+                        continue
+                    d2 = np.sum((prev_xyz[cand_idx] - p) ** 2, axis=1)
+                    within = np.where(d2 <= r2)[0]
+                    if within.size == 0:
+                        continue
+                    sel = within[np.argsort(d2[within])[:kk]]
+                    neigh_idx = np.asarray(cand_idx, dtype=np.int32)[sel]
+                    cats = prev_cats[neigh_idx]
+                    if cats.size == 1:
+                        cat = int(cats[0])
+                    else:
+                        vals, counts = np.unique(cats, return_counts=True)
+                        cat = int(vals[np.argmax(counts)])
+                    cats_out[i] = cat
+                    nearest = neigh_idx[np.argmin(d2[sel])]
+                    ins_out[i] = int(prev_ins[nearest])
+                    hits_local += 1
+                return hits_local
+
+            # Try widening radii
+            used_r = None
+            hits_total = 0
+            for scale in (1.0, 2.0, 4.0, 8.0):
+                rr = base_radius * scale
+                hits_total = pass_once(rr)
+                used_r = rr
+                if hits_total >= max(1, int(0.01 * N)):
+                    break
+            return hits_total, used_r, cats_out, ins_out
+
+        # Attempt world coordinates first (if available)
+        best_mode = None
+        best_hits = -1
+        best_r = None
+        best_cats = None
+        best_ins = None
+
+        if prev_world is not None:
+            curr_world = pointcloud.xyz + pointcloud.offset
+            hits_w, r_w, cats_w, ins_w = run_with(prev_world.astype(np.float32, copy=False),
+                                                  curr_world.astype(np.float32, copy=False),
+                                                  radius)
+            best_mode, best_hits, best_r, best_cats, best_ins = 'world', hits_w, r_w, cats_w, ins_w
+
+        # Fallback to local coordinates if coverage is too low
+        if (best_hits < max(1, int(0.01 * N))) and (prev_local is not None):
+            curr_local = pointcloud.xyz
+            hits_l, r_l, cats_l, ins_l = run_with(prev_local.astype(np.float32, copy=False),
+                                                  curr_local.astype(np.float32, copy=False),
+                                                  radius)
+            if hits_l >= best_hits:
+                best_mode, best_hits, best_r, best_cats, best_ins = 'local', hits_l, r_l, cats_l, ins_l
+
+        return best_cats, best_ins, {'total': N, 'hit': int(max(0, best_hits)), 'used_radius': best_r, 'mode': best_mode}
+
+    def _update_prev_cache(self):
+        """
+        Capture current sample's annotated points into cache for next-frame pre-annotation.
+        Store points that are annotated by category or have a non-zero instance id to be robust.
+        """
+        if self.openGLWidget.pointcloud is None or self.openGLWidget.categorys is None:
+            self._prev_annot_cache = None
+            return
+        xyz_world = self.openGLWidget.pointcloud.xyz + self.openGLWidget.pointcloud.offset
+        cats = self.openGLWidget.categorys
+        ins = self.openGLWidget.instances if self.openGLWidget.instances is not None else np.zeros_like(cats, dtype=np.int16)
+        try:
+            cats_list = list(self.category_color_dict.keys())
+            uncls_index = cats_list.index('__unclassified__')
+        except Exception:
+            uncls_index = 0
+        # Consider annotated if category != unclassified OR instance != 0
+        mask = (cats != uncls_index) | (ins != 0)
+        if not np.any(mask):
+            # still keep empty cache to avoid repeated work
+            self._prev_annot_cache = {
+                'xyz': np.empty((0,3), dtype=np.float32),         # kept for backward compatibility (world)
+                'xyz_world': np.empty((0,3), dtype=np.float32),
+                'xyz_local': np.empty((0,3), dtype=np.float32),
+                'cats': np.empty((0,), dtype=np.int16),
+                'ins': np.empty((0,), dtype=np.int16)
+            }
+            return
+        xyz_world_masked = xyz_world[mask].astype(np.float32, copy=False)
+        xyz_local_masked = self.openGLWidget.pointcloud.xyz[mask].astype(np.float32, copy=False)
+        self._prev_annot_cache = {
+            'xyz': xyz_world_masked,                 # kept for backward compatibility (world)
+            'xyz_world': xyz_world_masked,
+            'xyz_local': xyz_local_masked,
+            'cats': cats[mask].astype(np.int16, copy=False),
+            'ins': ins[mask].astype(np.int16, copy=False)
+        }
 
     def init_connect(self):
         self.actionOpen.triggered.connect(self.open_file)
@@ -641,6 +848,9 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.actionRotationCenter.toggled.connect(self.openGLWidget.set_rotation_center_on_double_click_enabled)
         # Auto Save toggle UI
         self.actionAutoSave.toggled.connect(self.on_actionAutoSave_toggled)
+        # Pre-annotation toggle
+        if hasattr(self, 'actionPreAnnotate'):
+            self.actionPreAnnotate.toggled.connect(lambda checked: setattr(self, 'preanno_enabled', checked))
         # Projection overlay actions
         if hasattr(self, 'actionToggleProjection'):
             self.actionToggleProjection.toggled.connect(self.openGLWidget.set_projection_enabled)
