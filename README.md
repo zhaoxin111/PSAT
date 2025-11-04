@@ -1,4 +1,4 @@
-# 基于原[PSAT](https://github.com/yatengLG/PSAT.git)开源代码,添加了一些新的功能特性.
+# 基于原[PSAT](https://github.com/yatengLG/PSAT.git)开源代码,添加了一些新的功能特性. 如有问题请通过[email](491498408@qq.com)与我联系
 # Update
 基于PSAT添加了一些新的功能
 1. 支持A/D快捷键切换上下点云
@@ -9,14 +9,15 @@
 6. 支持exe导出。python -m PyInstaller --noconfirm --clean PSAT.spec，导出exe位于dist/PSAT.exe
 7. 支持设置保存结果文件夹,若不设置默认保存在点云文件夹
 8. 支持点云投影在线可视化.
-step1: 点击load projection calibration导入内外参以及图片文件夹地址,内外参格式参考example/debug/0818080124090003.json;图片文件夹内图片名需与点云一致,后缀可为常见图片后缀(jpg,png,jpeg等)
-step2: 点击projection overlay即可显示投影结果;取消选中该按钮可取消显示图片.
-step3: 通过CTRL+鼠标滚轮调节图片大小;通过SHIFT+鼠标滚轮调节投影点大小.
+    - step1: 点击load projection calibration导入内外参以及图片文件夹地址,内外参格式参考example/debug/0818080124090003.json;图片文件夹内图片名需与点云一致,后缀可为常见图片后缀(jpg,png,jpeg等)
+    - step2: 点击projection overlay即可显示投影结果;取消选中该按钮可取消显示图片.
+    - step3: 通过CTRL+鼠标滚轮调节图片大小;通过SHIFT+鼠标滚轮调节投影点大小.
 ![example](example/pic/example.png)
 
 9. 修复拖拽，旋转，标注点云时RAM持续增长问题，在开启投影点可视化现可稳定在80M RAM占用.
 10. 支持预标注。点击pre-annotate next按钮开启预标注，软件会自动将当前标注结果缓存以自动生成下一帧的标注预览。其中pre-annotate window size控制预标注缓存帧数，帧数越多生成的预标注结果越全，但需
 警惕对移动目标过多缓存帧可能会带来更多噪声。
+
 
 # [PSAT](http://www.yatenglg.cn/psat) - 点云分割标注工具
 ![psat.png](example/pic/标注.gif)
