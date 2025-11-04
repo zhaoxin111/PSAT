@@ -15,6 +15,8 @@ step3: 通过CTRL+鼠标滚轮调节图片大小;通过SHIFT+鼠标滚轮调节�
 ![example](example/pic/example.png)
 
 9. 修复拖拽，旋转，标注点云时RAM持续增长问题，在开启投影点可视化现可稳定在80M RAM占用.
+10. 支持预标注。点击pre-annotate next按钮开启预标注，软件会自动将当前标注结果缓存以自动生成下一帧的标注预览。其中pre-annotate window size控制预标注缓存帧数，帧数越多生成的预标注结果越全，但需
+警惕对移动目标过多缓存帧可能会带来更多噪声。
 
 # [PSAT](http://www.yatenglg.cn/psat) - 点云分割标注工具
 ![psat.png](example/pic/标注.gif)

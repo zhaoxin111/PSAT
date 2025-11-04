@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 # @Author  : LG
 
+import logging
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 import laspy
 from plyfile import PlyData
+from typing import Tuple
 
 
-def las_read(file_path) -> (np.ndarray, np.ndarray, np.ndarray):
+logger = logging.getLogger(__name__)
+
+
+def las_read(file_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     data = laspy.read(file_path)
     vertices = np.vstack((data.x, data.y, data.z)).transpose()
     try:
@@ -28,7 +33,7 @@ def las_read(file_path) -> (np.ndarray, np.ndarray, np.ndarray):
     return vertices, rgb, size, offset
 
 
-def ply_read(file_path):
+def ply_read(file_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     ply_data = PlyData.read(file_path)
     if 'vertex' not in ply_data:
         return np.array([]), np.array([]), np.array([0, 0, 0]), np.array([0, 0, 0])
@@ -54,25 +59,52 @@ def ply_read(file_path):
     return vertices, colors, size, offset
 
 
-def txt_read(file_path) -> (np.ndarray, np.ndarray, np.ndarray):
-    '''
-    txt格式存储的点云。
-    每行代表一个点，共六列分别为x, y, z, r, g, b
-    rgb值为0-255
-    :param file_path:
-    :return:
-    '''
-    datas = np.loadtxt(file_path)
-    datas = datas.astype(np.float32)
-    vertices = datas[:, :3]
-    rgb = datas[:, 3:6]
-    xmin, ymin, zmin = min(vertices[:, 0]), min(vertices[:, 1]), min(vertices[:, 2])
-    xmax, ymax, zmax = max(vertices[:, 0]), max(vertices[:, 1]), max(vertices[:, 2])
-    vertices -= (xmin, ymin, zmin)
-    rgb = rgb / 255
-    offset = np.array([xmin, ymin, zmin])
-    size = np.array((xmax - xmin, ymax - ymin, zmax - zmin))
-    return vertices, rgb, size, offset
+def txt_read(file_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    读取以ASCII文本存储的点云文件。
+    支持如下布局：
+      - XYZ（至少3列）
+      - XYZRGB（至少6列，RGB可为0-1或0-255）
+    额外列会被忽略。
+    """
+    logger.debug("txt_read | path=%s", file_path)
+    datas = np.loadtxt(file_path, dtype=np.float32)
+    if datas.ndim == 1:
+        datas = datas.reshape(1, -1)
+    if datas.shape[1] < 3:
+        raise ValueError(f"Point cloud file '{file_path}' must contain at least 3 columns for XYZ.")
+    vertices = datas[:, :3].astype(np.float32, copy=False)
+
+    rgb: np.ndarray
+    if datas.shape[1] >= 6:
+        rgb = datas[:, 3:6].astype(np.float32, copy=False)
+        if rgb.size == 0:
+            logger.debug("txt_read | rgb columns detected but empty -> default white")
+            rgb = np.ones_like(vertices, dtype=np.float32)
+        else:
+            max_val = float(np.max(rgb))
+            min_val = float(np.min(rgb))
+            logger.debug("txt_read | raw rgb range min=%.3f max=%.3f", min_val, max_val)
+            if max_val > 1.0001 or min_val < -0.0001:
+                rgb = np.clip(rgb, 0.0, 255.0) / 255.0
+                logger.debug("txt_read | rgb normalized from 0-255 to 0-1")
+            else:
+                rgb = np.clip(rgb, 0.0, 1.0)
+                logger.debug("txt_read | rgb already in 0-1 range")
+    else:
+        rgb = np.ones_like(vertices, dtype=np.float32)
+        logger.debug("txt_read | only XYZ columns -> default white")
+
+    xmin, ymin, zmin = float(np.min(vertices[:, 0])), float(np.min(vertices[:, 1])), float(np.min(vertices[:, 2]))
+    xmax, ymax, zmax = float(np.max(vertices[:, 0])), float(np.max(vertices[:, 1])), float(np.max(vertices[:, 2]))
+    vertices -= np.array([xmin, ymin, zmin], dtype=np.float32)
+    logger.debug(
+        "txt_read | total_points=%d bbox_min=(%.3f, %.3f, %.3f) size=(%.3f, %.3f, %.3f)",
+        vertices.shape[0], xmin, ymin, zmin, xmax - xmin, ymax - ymin, zmax - zmin
+    )
+    offset = np.array([xmin, ymin, zmin], dtype=np.float32)
+    size = np.array((xmax - xmin, ymax - ymin, zmax - zmin), dtype=np.float32)
+    return vertices, rgb.astype(np.float32, copy=False), size, offset
 
 
 class PointCloud:
@@ -112,11 +144,12 @@ class PointCloudReadThread(QThread):
 
     @staticmethod
     def read(file_path:str):
-        if file_path.endswith('.las'):
+        lower_path = file_path.lower()
+        if lower_path.endswith('.las'):
             xyz, rgb, size, offset = las_read(file_path)
-        elif file_path.endswith('.ply'):
+        elif lower_path.endswith('.ply'):
             xyz, rgb, size, offset = ply_read(file_path)
-        elif file_path.endswith('.txt'):
+        elif lower_path.endswith('.txt') or lower_path.endswith('.xyz') or lower_path.endswith('.xyzrgb'):
             xyz, rgb, size, offset = txt_read(file_path)
         else:
             return None

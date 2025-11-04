@@ -1351,12 +1351,58 @@ class GLWidget(QGLWidget):
         u = u[in_img].astype(np.int32)
         v = v[in_img].astype(np.int32)
 
-        # Colors by category
-        # Ensure category colors exist
+        # Colors by category/RGB with robust fallback to visible points
         try:
-            if self.category_color is None and self.categorys is not None:
-                self.category_color_update()
-            colors = (self.category_color[front][in_img] * 255.0).astype(np.uint8) if self.category_color is not None else np.full((u.shape[0], 3), 255, dtype=np.uint8)
+            base_colors = None
+            rgb_colors = getattr(self.pointcloud, "rgb", None)
+            if isinstance(rgb_colors, np.ndarray) and rgb_colors.ndim == 2 and rgb_colors.shape[0] == self.pointcloud.xyz.shape[0] and rgb_colors.shape[1] >= 3:
+                rgb_colors = rgb_colors.astype(np.float32, copy=False)
+            else:
+                rgb_colors = None
+
+            if self.display == DISPLAY.RGB and rgb_colors is not None:
+                base_colors = rgb_colors
+            elif self.display == DISPLAY.ELEVATION and isinstance(getattr(self, "elevation_color", None), np.ndarray) \
+                    and self.elevation_color.ndim == 2 and self.elevation_color.shape[0] == self.pointcloud.xyz.shape[0]:
+                base_colors = self.elevation_color.astype(np.float32, copy=False)
+            elif self.display == DISPLAY.INSTANCE and isinstance(getattr(self, "instance_color", None), np.ndarray) \
+                    and self.instance_color.ndim == 2 and self.instance_color.shape[0] == self.pointcloud.xyz.shape[0]:
+                base_colors = self.instance_color.astype(np.float32, copy=False)
+            else:
+                if (self.category_color is None or not isinstance(self.category_color, np.ndarray)
+                        or self.category_color.shape[0] != self.pointcloud.xyz.shape[0]):
+                    if self.categorys is not None:
+                        self.category_color_update()
+                if isinstance(self.category_color, np.ndarray) and self.category_color.ndim == 2:
+                    base_colors = self.category_color.astype(np.float32, copy=False)
+
+            if base_colors is None and rgb_colors is not None:
+                base_colors = rgb_colors
+
+            # Build uint8 colors with visibility safeguards
+            if base_colors is not None and base_colors.ndim == 2 and base_colors.shape[1] >= 3:
+                colors_f = base_colors[front][in_img]
+                if colors_f.size == 0:
+                    colors = np.empty((0, 3), dtype=np.uint8)
+                else:
+                    # Normalize to 0..1 if needed
+                    if np.nanmax(colors_f) > 1.0001 or np.nanmin(colors_f) < -0.0001:
+                        colors_lin = np.clip(colors_f, 0.0, 255.0) / 255.0
+                    else:
+                        colors_lin = np.clip(colors_f, 0.0, 1.0)
+                    # If all colors are near-black, force high-contrast white
+                    if not np.any(colors_lin > 0.02):
+                        colors = np.full((colors_lin.shape[0], 3), 255, dtype=np.uint8)
+                    else:
+                        # Boost very dark colors to ensure visibility on dark images
+                        luma = (0.299 * colors_lin[:, 0] + 0.587 * colors_lin[:, 1] + 0.114 * colors_lin[:, 2])
+                        low = luma < 0.20
+                        if np.any(low):
+                            # Blend toward white for low-luminance points
+                            colors_lin[low] = 0.7 * 1.0 + 0.3 * colors_lin[low]
+                        colors = (colors_lin * 255.0).astype(np.uint8)
+            else:
+                colors = np.full((u.shape[0], 3), 255, dtype=np.uint8)
         except Exception:
             colors = np.full((u.shape[0], 3), 255, dtype=np.uint8)
 
@@ -1394,10 +1440,12 @@ class GLWidget(QGLWidget):
                     pts = [QtCore.QPoint(int(u[i]), int(v[i])) for i in np.nonzero(mask)[0]]
                     painter.drawPoints(QtGui.QPolygon(pts))
                 else:
-                    # Draw small filled squares for visibility
+                    # Draw small filled squares with a subtle outline for visibility
                     for i in np.nonzero(mask)[0]:
                         x = int(u[i]) - s // 2
                         y = int(v[i]) - s // 2
+                        # Outline (white) to stand out on dark/light backgrounds
+                        painter.fillRect(x - 1, y - 1, s + 2, s + 2, QtGui.QColor(255, 255, 255))
                         painter.fillRect(x, y, s, s, color)
         painter.end()
         return qimg
