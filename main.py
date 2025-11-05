@@ -22,6 +22,157 @@ import numpy as np
 import os
 from typing import Optional
 
+class PreAnnotateThread(QtCore.QThread):
+    finished_ok = QtCore.pyqtSignal(str, object, object, dict)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, file_path: str, point_xyz: np.ndarray, point_offset: np.ndarray, caches: list,
+                 radius: float, k: int, uncls_index: int, max_prev_points: int = 400000,
+                 min_hit_fraction: float = 0.01):
+        super().__init__()
+        self.file_path = file_path
+        self.point_xyz = np.array(point_xyz, dtype=np.float32, copy=True)
+        self.point_offset = np.array(point_offset, dtype=np.float32, copy=True)
+        self.caches = caches[:] if isinstance(caches, list) else list(caches)
+        self.radius = float(radius)
+        self.k = int(k)
+        self.uncls_index = int(uncls_index)
+        self.max_prev_points = int(max_prev_points)
+        self.min_hit_fraction = float(min_hit_fraction)
+
+    def run(self):
+        try:
+            import math
+            N = int(self.point_xyz.shape[0])
+
+            # Gather non-empty caches
+            non_empty = []
+            for c in self.caches:
+                try:
+                    cats = c.get('cats', None)
+                    if cats is None:
+                        continue
+                    if int(np.asarray(cats).shape[0]) > 0:
+                        non_empty.append(c)
+                except Exception:
+                    continue
+            frames_used = len(non_empty)
+            if frames_used == 0:
+                self.finished_ok.emit(self.file_path, None, None, {'total': N, 'hit': 0, 'used_radius': None, 'mode': None, 'frames_used': 0})
+                return
+
+            concat_world, concat_local, concat_cats, concat_ins = [], [], [], []
+            for c in non_empty:
+                if 'xyz_world' in c:
+                    concat_world.append(np.asarray(c['xyz_world'], dtype=np.float32))
+                elif 'xyz' in c:
+                    concat_world.append(np.asarray(c['xyz'], dtype=np.float32))
+                if 'xyz_local' in c:
+                    concat_local.append(np.asarray(c['xyz_local'], dtype=np.float32))
+                concat_cats.append(np.asarray(c['cats'], dtype=np.int16))
+                concat_ins.append(np.asarray(c['ins'], dtype=np.int16))
+
+            prev_world = np.concatenate(concat_world, axis=0) if len(concat_world) > 0 else None
+            prev_local = np.concatenate(concat_local, axis=0) if len(concat_local) > 0 else None
+            prev_cats = np.concatenate(concat_cats, axis=0) if len(concat_cats) > 0 else np.empty((0,), dtype=np.int16)
+            prev_ins  = np.concatenate(concat_ins, axis=0) if len(concat_ins) > 0 else np.empty((0,), dtype=np.int16)
+
+            total_prev = int(prev_cats.shape[0])
+            if total_prev > self.max_prev_points and total_prev > 0:
+                rng = np.random.default_rng()
+                idx = rng.choice(total_prev, size=self.max_prev_points, replace=False)
+                prev_cats = prev_cats[idx]
+                prev_ins  = prev_ins[idx]
+                if prev_world is not None:
+                    prev_world = prev_world[idx]
+                if prev_local is not None:
+                    prev_local = prev_local[idx]
+
+            def run_with(prev_xyz: np.ndarray, curr_xyz: np.ndarray, base_radius: float):
+                Nloc = curr_xyz.shape[0]
+                cats_out = np.full(Nloc, self.uncls_index, dtype=np.int16)
+                ins_out = np.zeros(Nloc, dtype=np.int16)
+
+                def pass_once(rr: float):
+                    rr = float(max(1e-6, rr))
+                    cell = rr * 0.75
+                    inv = 1.0 / cell
+
+                    buckets = {}
+                    for i in range(prev_xyz.shape[0]):
+                        key = tuple(np.floor(prev_xyz[i] * inv).astype(np.int64).tolist())
+                        lst = buckets.get(key)
+                        if lst is None:
+                            buckets[key] = [i]
+                        else:
+                            lst.append(i)
+
+                    r_cells = int(math.ceil(rr / cell))
+                    nbr_offsets = [(dx, dy, dz)
+                                   for dx in range(-r_cells, r_cells + 1)
+                                   for dy in range(-r_cells, r_cells + 1)
+                                   for dz in range(-r_cells, r_cells + 1)]
+                    r2 = rr * rr
+                    kk = int(max(1, self.k))
+                    hits_local = 0
+
+                    for i in range(Nloc):
+                        p = curr_xyz[i]
+                        base = tuple(np.floor(p * inv).astype(np.int64).tolist())
+                        cand_idx = []
+                        for off in nbr_offsets:
+                            key = (base[0] + off[0], base[1] + off[1], base[2] + off[2])
+                            lst = buckets.get(key)
+                            if lst:
+                                cand_idx.extend(lst)
+                        if not cand_idx:
+                            continue
+                        cand_idx_arr = np.asarray(cand_idx, dtype=np.int32)
+                        d2 = np.sum((prev_xyz[cand_idx_arr] - p) ** 2, axis=1)
+                        within = np.where(d2 <= r2)[0]
+                        if within.size == 0:
+                            continue
+                        sel = within[np.argsort(d2[within])[:kk]]
+                        neigh_idx = cand_idx_arr[sel]
+                        cats = prev_cats[neigh_idx]
+                        if cats.size == 1:
+                            cat = int(cats[0])
+                        else:
+                            vals, counts = np.unique(cats, return_counts=True)
+                            cat = int(vals[np.argmax(counts)])
+                        cats_out[i] = cat
+                        nearest = neigh_idx[np.argmin(d2[sel])]
+                        ins_out[i] = int(prev_ins[nearest])
+                        hits_local += 1
+                    return hits_local
+
+                used_r = None
+                hits_total = 0
+                for scale in (1.0, 2.0, 4.0, 8.0):
+                    rr = base_radius * scale
+                    hits_total = pass_once(rr)
+                    used_r = rr
+                    if hits_total >= max(1, int(self.min_hit_fraction * Nloc)):
+                        break
+                return hits_total, used_r, cats_out, ins_out
+
+            best_mode, best_hits, best_r, best_cats, best_ins = None, -1, None, None, None
+            if prev_world is not None and prev_world.shape[0] > 0:
+                curr_world = (self.point_xyz + self.point_offset).astype(np.float32, copy=False)
+                hits_w, r_w, cats_w, ins_w = run_with(prev_world.astype(np.float32, copy=False), curr_world, self.radius)
+                best_mode, best_hits, best_r, best_cats, best_ins = 'world', hits_w, r_w, cats_w, ins_w
+
+            if (best_hits < max(1, int(self.min_hit_fraction * N))) and (prev_local is not None) and (prev_local.shape[0] > 0):
+                curr_local = self.point_xyz.astype(np.float32, copy=False)
+                hits_l, r_l, cats_l, ins_l = run_with(prev_local.astype(np.float32, copy=False), curr_local, self.radius)
+                if hits_l >= best_hits:
+                    best_mode, best_hits, best_r, best_cats, best_ins = 'local', hits_l, r_l, cats_l, ins_l
+
+            stats = {'total': N, 'hit': int(max(0, best_hits)), 'used_radius': best_r, 'mode': best_mode, 'frames_used': frames_used}
+            self.finished_ok.emit(self.file_path, best_cats, best_ins, stats)
+        except Exception as e:
+            self.failed.emit(str(e))
+
 
 class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
     def __init__(self):
@@ -109,6 +260,10 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.preanno_window_k = 3
         self._annot_cache_deque = deque(maxlen=self.preanno_window_k)
         self._prev_annot_cache = None
+        # Async pre-annotation configuration
+        self.preanno_thread = None
+        self.preanno_max_prev_points = 400000   # cap concatenated previous annotated points
+        self.preanno_min_hit_fraction = 0.01    # 1% coverage threshold to early-stop
 
     def open_file(self):
         self.dockWidget_files.setVisible(False)
@@ -219,24 +374,12 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
             if pointcloud.num_point < 1:
                 return
 
-            # If no labels found on disk and pre-annotation is enabled, try to propagate from previous frame
+            # If no labels found on disk and pre-annotation is enabled, start async pre-annotation (non-blocking)
             if categorys is None and instances is None and getattr(self, 'preanno_enabled', False):
                 try:
-                    cats_pred, ins_pred, stats = self._preannotate_from_prev(pointcloud, self.preanno_radius, self.preanno_k)
-                    if cats_pred is not None and ins_pred is not None:
-                        categorys, instances = cats_pred, ins_pred
-                        self.save_state = False  # dirty; produced pre-annotations
-                        hit, total = stats.get('hit', 0), stats.get('total', 0)
-                        used_r = stats.get('used_radius', self.preanno_radius)
-                        mode = stats.get('mode', 'world')
-                        frames_used = stats.get('frames_used', 1)
-                        try:
-                            msg_r = f"{used_r:.3f}" if used_r is not None else "n/a"
-                        except Exception:
-                            msg_r = str(used_r)
-                        self.show_message(f"Pre-annotate ({mode}): {hit}/{total} voted, r~{msg_r}, k={self.preanno_k}, frames={frames_used}", 4000)
+                    self._start_preannotation(pointcloud)
                 except Exception as e:
-                    self.show_message(f"Pre-annotate failed: {e}", 5000)
+                    self.show_message(f"Pre-annotate start failed: {e}", 5000)
 
             self.openGLWidget.load_vertices(pointcloud, categorys, instances)
             #
@@ -899,6 +1042,65 @@ class Mainwindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 dq.append(self._prev_annot_cache)
         except Exception:
             pass
+
+    def _start_preannotation(self, pointcloud):
+        try:
+            cats_list = list(self.category_color_dict.keys())
+            uncls_index = cats_list.index('__unclassified__')
+        except Exception:
+            uncls_index = 0
+        caches = list(getattr(self, '_annot_cache_deque', []))
+        # Fire background thread; result will be ignored if user navigated away
+        t = PreAnnotateThread(
+            file_path=self.current_file,
+            point_xyz=pointcloud.xyz,
+            point_offset=pointcloud.offset,
+            caches=caches,
+            radius=self.preanno_radius,
+            k=self.preanno_k,
+            uncls_index=uncls_index,
+            max_prev_points=getattr(self, 'preanno_max_prev_points', 400000),
+            min_hit_fraction=getattr(self, 'preanno_min_hit_fraction', 0.01),
+        )
+        t.finished_ok.connect(self._on_preannotate_finished)
+        t.failed.connect(self._on_preannotate_failed)
+        self.preanno_thread = t
+        self.show_message("Pre-annotate: running in background...", 1500)
+        t.start()
+
+    def _on_preannotate_finished(self, file_path: str, cats: Optional[np.ndarray], ins: Optional[np.ndarray], stats: dict):
+        # Ignore if file changed
+        if file_path != self.current_file:
+            self.preanno_thread = None
+            return
+        if cats is None or ins is None:
+            self.preanno_thread = None
+            return
+        try:
+            self.save_state = False
+            # Reload just labels/colors for the already loaded point cloud
+            pc = self.openGLWidget.pointcloud
+            self.openGLWidget.load_vertices(pc, cats, ins)
+            hit, total = stats.get('hit', 0), stats.get('total', 0)
+            used_r = stats.get('used_radius', self.preanno_radius)
+            mode = stats.get('mode', 'world')
+            frames_used = stats.get('frames_used', 1)
+            try:
+                msg_r = f"{used_r:.3f}" if used_r is not None else "n/a"
+            except Exception:
+                msg_r = str(used_r)
+            self.show_message(f"Pre-annotate ({mode}): {hit}/{total} voted, r~{msg_r}, k={self.preanno_k}, frames={frames_used}", 4000)
+            # Update prev cache now that labels exist
+            try:
+                self._update_prev_cache()
+            except Exception:
+                pass
+        finally:
+            self.preanno_thread = None
+
+    def _on_preannotate_failed(self, err: str):
+        self.preanno_thread = None
+        self.show_message(f"Pre-annotate failed: {err}", 5000)
 
     def init_connect(self):
         self.actionOpen.triggered.connect(self.open_file)
